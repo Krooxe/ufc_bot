@@ -1,0 +1,32 @@
+# Файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Файлы бота
+*.db
+*.sqlite
+*.sqlite3
+
+# Секретные файлы
+.env
+.env.local
+.env.*.local
+
+# Логи
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Операционные системы
+.DS_Store
+Thumbs.db
