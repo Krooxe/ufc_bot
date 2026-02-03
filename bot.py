@@ -244,22 +244,39 @@ async def process_current(callback: CallbackQuery):
                 f"👥 <b>Участников:</b> {len(all_users)}\n\n"
             )
             
-            # Ставки текущего пользователя
+                        # Ставки текущего пользователя
             user_bets_text = ""
             if callback.from_user.id in bets_by_user:
                 user_bets_text = "🎯 <b>Ваши ставки:</b>\n"
                 
-                # Основные ставки
-                main_bets = [b for b in bets_by_user[callback.from_user.id] if b.bet_type == 'main']
+                # Получаем и сортируем ставки пользователя
+                user_bets_list = bets_by_user[callback.from_user.id]
+                main_bets = [b for b in user_bets_list if b.bet_type == 'main']
+                
+                # Создаем список для сортировки
+                sorted_main_bets = []
                 for bet in main_bets:
                     fight = fights_dict.get(bet.fight_id)
                     if fight:
-                        fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                        odds = bet.odds_at_bet
-                        user_bets_text += f"• Бой {fight.fight_order}: <b>{fighter_name}</b> ({odds:.2f})\n"
+                        sorted_main_bets.append({
+                            'bet': bet,
+                            'fight_order': fight.fight_order,
+                            'fight': fight
+                        })
+                
+                # СОРТИРУЕМ по fight_order
+                sorted_main_bets.sort(key=lambda x: x['fight_order'])
+                
+                # Выводим отсортированные ставки
+                for item in sorted_main_bets:
+                    bet = item['bet']
+                    fight = item['fight']
+                    fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
+                    odds = bet.odds_at_bet
+                    user_bets_text += f"• Бой {fight.fight_order}: <b>{fighter_name}</b> ({odds:.2f})\n"
                 
                 # Страховочная ставка
-                insurance_bets = [b for b in bets_by_user[callback.from_user.id] if b.bet_type == 'insurance']
+                insurance_bets = [b for b in user_bets_list if b.bet_type == 'insurance']
                 if insurance_bets:
                     bet = insurance_bets[0]
                     fight = fights_dict.get(bet.fight_id)
@@ -270,7 +287,7 @@ async def process_current(callback: CallbackQuery):
             else:
                 user_bets_text = "🎯 <b>Ваши ставки:</b> пока нет\n"
             
-            # Ставки других игроков
+                        # Ставки других игроков (ПОЛНЫЙ СПИСОК)
             other_players_text = "\n<b>👥 Ставки других игроков:</b>\n"
             players_without_bets = 0
             players_with_bets = 0
@@ -285,23 +302,41 @@ async def process_current(callback: CallbackQuery):
                     players_with_bets += 1
                     other_players_text += f"\n<b>{username}:</b>\n"
                     
-                    # Показываем только основные ставки других игроков (без коэффициентов, чтобы не спойлерить)
+                    # Получаем все ставки этого игрока
                     user_bets_list = bets_by_user[other_user.user_id]
-                    main_bets = [b for b in user_bets_list if b.bet_type == 'main']
                     
-                    for bet in main_bets[:3]:  # Показываем только первые 3 ставки
+                    # Разделяем основные и страховочные
+                    main_bets = [b for b in user_bets_list if b.bet_type == 'main']
+                    insurance_bets = [b for b in user_bets_list if b.bet_type == 'insurance']
+                    
+                    # СОРТИРУЕМ основные ставки по fight_order
+                    sorted_main_bets = []
+                    for bet in main_bets:
+                        fight = fights_dict.get(bet.fight_id)
+                        if fight:
+                            sorted_main_bets.append({
+                                'bet': bet,
+                                'fight_order': fight.fight_order,
+                                'fight': fight
+                            })
+                    
+                    sorted_main_bets.sort(key=lambda x: x['fight_order'])
+                    
+                    # Показываем ВСЕ основные ставки (как у себя)
+                    for item in sorted_main_bets:
+                        bet = item['bet']
+                        fight = item['fight']
+                        fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
+                        # Для других игроков НЕ показываем коэффициенты (чтобы не спойлерить)
+                        other_players_text += f"• Бой {fight.fight_order}: {fighter_name}\n"
+                    
+                    # Страховочная ставка (если есть)
+                    if insurance_bets:
+                        bet = insurance_bets[0]
                         fight = fights_dict.get(bet.fight_id)
                         if fight:
                             fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                            other_players_text += f"• Бой {fight.fight_order}: {fighter_name}\n"
-                    
-                    if len(main_bets) > 3:
-                        other_players_text += f"• ... и ещё {len(main_bets) - 3} ставок\n"
-                    
-                    # Упоминаем если есть страховка
-                    insurance_bets = [b for b in user_bets_list if b.bet_type == 'insurance']
-                    if insurance_bets:
-                        other_players_text += f"• 🛡️ Есть страховочная ставка\n"
+                            other_players_text += f"• 🛡️ Страховка (бой {fight.fight_order}): {fighter_name}\n"
                 else:
                     players_without_bets += 1
                     other_players_text += f"\n<b>{username}:</b> ставку ещё не делал\n"
@@ -439,18 +474,34 @@ async def process_my_bets_detail(callback: CallbackQuery):
             else:
                 text = f"📊 <b>Ваши ставки на {event.title}</b>\n\n"
                 
+                # Разделяем ставки
                 main_bets = [b for b in bets if b.bet_type == 'main']
                 insurance_bets = [b for b in bets if b.bet_type == 'insurance']
                 
+                # СОРТИРУЕМ основные ставки по fight_order
+                main_bets_sorted = []
+                for bet in main_bets:
+                    fight = fights_dict.get(bet.fight_id)
+                    if fight:
+                        main_bets_sorted.append({
+                            'bet': bet,
+                            'fight_order': fight.fight_order,
+                            'fight': fight
+                        })
+                
+                main_bets_sorted.sort(key=lambda x: x['fight_order'])
+                
                 if main_bets:
                     text += "<b>🌟 Основные ставки (5):</b>\n"
-                    for bet in main_bets:
-                        fight = fights_dict.get(bet.fight_id)
-                        if fight:
-                            fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                            status_icon = "⏳" if bet.status == 'pending' else "✅" if bet.status == 'win' else "❌"
-                            text += f"• {status_icon} Бой {fight.fight_order}: <b>{fighter_name}</b> (коэф: <b>{bet.odds_at_bet:.2f}</b>) - {bet.status}\n"
+                    for item in main_bets_sorted:
+                        bet = item['bet']
+                        fight = item['fight']
+                        
+                        fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
+                        status_icon = "⏳" if bet.status == 'pending' else "✅" if bet.status == 'win' else "❌"
+                        text += f"• {status_icon} Бой {fight.fight_order}: <b>{fighter_name}</b> (коэф: <b>{bet.odds_at_bet:.2f}</b>) - {bet.status}\n"
                 
+                # Страховочная ставка
                 if insurance_bets:
                     text += "\n<b>🛡️ Страховочная ставка:</b>\n"
                     for bet in insurance_bets:
@@ -1186,11 +1237,13 @@ async def show_confirmation(message: Message, user_id: int, event_id: int):
             total_odds = 1.0
             main_bets_count = 0
             
-            # Основные ставки
+            # Основные ставки - СОРТИРУЕМ ПО fight_order
             selected_fights = betting_data.get('selected_fights_ordered', [])
             selected_winners = betting_data.get('selected_winners', {})
             
-            for i, fight in enumerate(selected_fights, 1):
+            # Создаем список ставок с информацией о боях
+            main_bets_list = []
+            for fight in selected_fights:
                 fight_id = fight.id
                 if fight_id in selected_winners:
                     winner_info = selected_winners[fight_id]
@@ -1200,13 +1253,25 @@ async def show_confirmation(message: Message, user_id: int, event_id: int):
                                    else fight.fighter2_name)
                     odds = fight.odds1 if chosen_fighter == 1 else fight.odds2
                     
-                    text += f"{i}. Бой {fight.fight_order}: <b>{fighter_name}</b> (коэф: <b>{odds:.2f}</b>)\n"
-                    
-                    if odds:
-                        total_odds *= float(odds)
-                    main_bets_count += 1
+                    main_bets_list.append({
+                        'fight_order': fight.fight_order,
+                        'fight_id': fight_id,
+                        'fighter_name': fighter_name,
+                        'odds': odds
+                    })
             
-                        # Страховочная ставка
+            # СОРТИРУЕМ по fight_order
+            main_bets_list.sort(key=lambda x: x['fight_order'])
+            
+            # Выводим отсортированные ставки
+            for i, bet_info in enumerate(main_bets_list, 1):
+                text += f"{i}. Бой {bet_info['fight_order']}: <b>{bet_info['fighter_name']}</b> (коэф: <b>{bet_info['odds']:.2f}</b>)\n"
+                
+                if bet_info['odds']:
+                    total_odds *= float(bet_info['odds'])
+                main_bets_count += 1
+            
+            # Страховочная ставка
             insurance_fight_id = betting_data.get('insurance_fight_id')
             insurance_winner = betting_data.get('insurance_winner')
             
