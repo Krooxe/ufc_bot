@@ -204,7 +204,7 @@ def get_test_ppv_event() -> Dict:
     event_date = datetime.now(timezone.utc) + timedelta(days=7)
     
     return {
-        'id': 'test-123',
+        'id': 123456,  # ИЗМЕНИТЬ: был 'test-123', теперь число!
         'name': 'UFC 305: Тестовый турнир',
         'shortName': 'UFC 305',
         'date': event_date.isoformat().replace('+00:00', 'Z'),
@@ -250,6 +250,110 @@ async def fetch_upcoming_events_with_fallback() -> Optional[List[Dict]]:
         return [get_test_ppv_event()]
     
     return events
+
+async def fetch_event_results(event_api_id: str) -> Optional[List[Dict]]:
+    """
+    Получает результаты завершенного турнира по его API ID
+    Возвращает список боев с результатами
+    """
+    if config.DEBUG_MODE:
+        logger.info("Используем тестовые результаты (DEBUG_MODE=True)")
+        return get_test_results()
+    
+    try:
+        # ESPN API для результатов
+        url = f"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/summary?event={event_api_id}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return parse_event_results(data)
+                else:
+                    logger.error(f"Ошибка ESPN API для event {event_api_id}: статус {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Ошибка получения результатов: {e}")
+        return None
+
+def parse_event_results(event_data: Dict) -> List[Dict]:
+    """
+    Парсит результаты боев из данных ESPN
+    """
+    fights = []
+    
+    competitions = event_data.get('competitions', [])
+    
+    for i, comp in enumerate(competitions, 1):
+        competitors = comp.get('competitors', [])
+        if len(competitors) >= 2:
+            fighter1 = competitors[0].get('athlete', {}).get('displayName', 'N/A')
+            fighter2 = competitors[1].get('athlete', {}).get('displayName', 'N/A')
+            
+            # Статус боя
+            status_type = comp.get('status', {}).get('type', {})
+            status_name = status_type.get('name', '').lower()
+            status_detail = status_type.get('detail', '').lower()
+            
+            winner = None
+            method = ''
+            
+            # Определяем победителя по статусу
+            if 'final' in status_name or 'result' in status_name:
+                # Бой завершен - проверяем who победил
+                for idx, competitor in enumerate(competitors, 1):
+                    if competitor.get('winner', False):
+                        winner = str(idx)
+                        break
+                
+                # Если не нашли winner флаг, проверяем по очкам (если есть)
+                if not winner and 'score' in comp:
+                    score1 = competitors[0].get('score', '0')
+                    score2 = competitors[1].get('score', '0')
+                    if score1 > score2:
+                        winner = '1'
+                    elif score2 > score1:
+                        winner = '2'
+                    else:
+                        winner = 'draw'
+                
+                method = status_detail
+            
+            elif 'no contest' in status_name or 'nc' in status_name:
+                winner = 'nc'
+                method = 'No Contest'
+            
+            elif 'draw' in status_name:
+                winner = 'draw'
+                method = 'Draw'
+            
+            elif 'canceled' in status_name or 'cancelled' in status_name:
+                winner = 'cancelled'
+                method = 'Canceled'
+            
+            # Если статус 'scheduled' или 'in progress' - winner остается None
+            
+            fights.append({
+                'fight_order': i,  # Порядковый номер
+                'fighter1_name': fighter1,
+                'fighter2_name': fighter2,
+                'winner': winner,  # None если бой еще не завершен
+                'method': method,
+                'status': status_name
+            })
+    
+    return fights
+
+def get_test_results() -> List[Dict]:
+    """Тестовые результаты для отладки"""
+    return [
+        {'fight_order': 1, 'fighter1_name': 'Тестовый Боец 1A', 'fighter2_name': 'Тестовый Боец 1B', 'winner': '1', 'method': 'KO'},
+        {'fight_order': 2, 'fighter1_name': 'Тестовый Боец 2A', 'fighter2_name': 'Тестовый Боец 2B', 'winner': '2', 'method': 'Submission'},
+        {'fight_order': 3, 'fighter1_name': 'Тестовый Боец 3A', 'fighter2_name': 'Тестовый Боец 3B', 'winner': '1', 'method': 'Decision'},
+        {'fight_order': 4, 'fighter1_name': 'Тестовый Боец 4A', 'fighter2_name': 'Тестовый Боец 4B', 'winner': 'nc', 'method': 'No Contest'},
+        {'fight_order': 5, 'fighter1_name': 'Тестовый Боец 5A', 'fighter2_name': 'Тестовый Боец 5B', 'winner': 'draw', 'method': 'Draw'},
+        {'fight_order': 6, 'fighter1_name': 'Тестовый Боец 6A', 'fighter2_name': 'Тестовый Боец 6B', 'winner': '1', 'method': 'TKO'},
+    ]
 
 if __name__ == "__main__":
     asyncio.run(test_espn_api())

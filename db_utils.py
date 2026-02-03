@@ -141,13 +141,6 @@ async def get_current_event(session: AsyncSession) -> Optional[Event]:
     )
     return result.scalar_one_or_none()
 
-async def get_event_by_id(session: AsyncSession, event_id: int) -> Optional[Event]:
-    """Получает турнир по ID"""
-    result = await session.execute(
-        select(Event).where(Event.id == event_id)
-    )
-    return result.scalar_one_or_none()
-
 # ==================== УТИЛИТЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 async def get_or_create_user(
@@ -260,6 +253,13 @@ async def update_fight_odds(
         await session.rollback()
         logger.error(f"Ошибка обновления коэффициентов: {e}")
         return False
+
+async def get_event_by_id(session: AsyncSession, event_id: int) -> Optional[Event]:
+    """Получает турнир по ID"""
+    result = await session.execute(
+        select(Event).where(Event.id == event_id)
+    )
+    return result.scalar_one_or_none()
 
 async def open_event_for_bets(session: AsyncSession, event_id: int) -> bool:
     """Открывает турнир для ставок"""
@@ -452,6 +452,260 @@ async def get_events_for_odds_edit(session: AsyncSession) -> List[Event]:
     )
     return result.scalars().all()
 
+async def update_event_results_from_api(session: AsyncSession, event: Event) -> bool:
+    """
+    Обновляет результаты турнира из API
+    """
+    try:
+        # ДЛЯ ТЕСТОВОГО РЕЖИМА: если DEBUG_MODE = True, всегда обновляем
+        if config.DEBUG_MODE:
+            logger.info(f"DEBUG_MODE: обновляем результаты для турнира {event.id}")
+            from ufc_api import get_test_results
+            
+            results = get_test_results()
+            
+            # Получаем существующие бои турнира
+            fights = await get_fights_for_event(session, event.id)
+            fights_dict = {f.fight_order: f for f in fights}
+            
+            # Обновляем результаты
+            updated_count = 0
+            for result in results:
+                fight_order = result.get('fight_order')
+                if not fight_order:
+                    continue
+                    
+                # Находим соответствующий бой
+                fight = fights_dict.get(fight_order)
+                if fight and fight.winner is None:  # Обновляем только если еще нет результата
+                    # Обновляем результат
+                    fight.winner = result.get('winner')
+                    updated_count += 1
+            
+            # Помечаем турнир как завершенный если все бои имеют результаты
+            if updated_count > 0:
+                await mark_event_as_finished(session, event.id)
+                await session.commit()
+                logger.info(f"DEBUG_MODE: обновлены результаты для {updated_count} боев турнира {event.id}")
+                return True
+            else:
+                logger.warning(f"DEBUG_MODE: не найдено боев для обновления в турнире {event.id}")
+                return False
+        
+        # РЕАЛЬНЫЙ API (если DEBUG_MODE = False)
+        if not event.ufc_api_id:
+            logger.warning(f"У турнира {event.id} нет API ID, нельзя обновить результаты")
+            return False
+        
+        # Получаем результаты из API
+        from ufc_api import fetch_event_results
+        results = await fetch_event_results(str(event.ufc_api_id))
+        
+        if not results:
+            logger.warning(f"Не удалось получить результаты для турнира {event.id}")
+            return False
+        
+        # Получаем существующие бои турнира
+        fights = await get_fights_for_event(session, event.id)
+        fights_dict = {f.fight_order: f for f in fights}
+        
+        # Обновляем результаты
+        updated_count = 0
+        for result in results:
+            fight_order = result.get('fight_order')
+            if not fight_order:
+                continue
+                
+            # Находим соответствующий бой
+            fight = fights_dict.get(fight_order)
+            if fight and fight.winner is None:  # Обновляем только если еще нет результата
+                # Обновляем результат
+                fight.winner = result.get('winner')
+                fight.odds1 = result.get('odds1', fight.odds1)  # Сохраняем старые коэфы если новых нет
+                fight.odds2 = result.get('odds2', fight.odds2)
+                updated_count += 1
+        
+        # Помечаем турнир как завершенный если все бои имеют результаты
+        if updated_count > 0:
+            await mark_event_as_finished(session, event.id)
+            await session.commit()
+            logger.info(f"Обновлены результаты для {updated_count} боев турнира {event.id}")
+            return True
+        else:
+            logger.warning(f"Не найдено боев для обновления в турнире {event.id}")
+            return False
+            
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Ошибка обновления результатов: {e}", exc_info=True)
+        return False
+
+async def get_finished_events(session: AsyncSession) -> List[Event]:
+    """Получает завершенные турниры"""
+    result = await session.execute(
+        select(Event)
+        .where(Event.status == 'finished')
+        .order_by(Event.date_utc.desc())
+    )
+    return result.scalars().all()
+
+async def get_events_needing_results(session: AsyncSession) -> List[Event]:
+    """
+    Получает турниры, которые нуждаются в обновлении результатов
+    (прошли по времени, но еще не имеют статус 'finished')
+    """
+    from datetime import datetime, timezone
+    
+    current_time = datetime.now(timezone.utc)
+    
+    result = await session.execute(
+        select(Event).where(
+            Event.status.in_(['open_for_bets', 'draft']),
+            Event.date_utc < current_time
+        ).order_by(Event.date_utc.desc())
+    )
+    return result.scalars().all()
+
+async def calculate_user_points_for_event(session: AsyncSession, user_id: int, event_id: int) -> float:
+    """
+    Рассчитывает очки пользователя за турнир
+    По правилам:
+    - Угадал победителя: + коэффициент
+    - Не угадал: 0
+    - Бой draw/nc/cancelled: используется страховочная ставка если есть
+    """
+    try:
+        # Получаем все ставки пользователя на этот турнир
+        bets = await get_user_bets_for_event(session, user_id, event_id)
+        if not bets:
+            return 0.0
+        
+        # Получаем все бои турнира
+        fights = await get_fights_for_event(session, event_id)
+        fights_dict = {f.id: f for f in fights}
+        
+        total_points = 0.0
+        used_insurance = False
+        
+        # Разделяем ставки
+        main_bets = [b for b in bets if b.bet_type == 'main']
+        insurance_bet = next((b for b in bets if b.bet_type == 'insurance'), None)
+        
+        # Проверяем основные ставки
+        cancelled_fights = []
+        
+        for bet in main_bets:
+            fight = fights_dict.get(bet.fight_id)
+            if not fight:
+                continue
+            
+            # Проверяем результат боя
+            if fight.winner == str(bet.chosen_fighter):
+                # Угадал победителя
+                points = float(bet.odds_at_bet) if bet.odds_at_bet else 0.0
+                total_points += points
+                
+                # Обновляем статус ставки
+                bet.status = 'win'
+                bet.points_earned = points
+                
+            elif fight.winner in ['draw', 'nc', 'cancelled', None]:
+                # Бой не состоялся или нет результата - запоминаем для возможной замены страховкой
+                cancelled_fights.append(bet.fight_id)
+                bet.status = 'cancelled'
+                bet.points_earned = 0.0
+                
+            else:
+                # Не угадал
+                bet.status = 'lose'
+                bet.points_earned = 0.0
+        
+        # Если есть отмененные бои и есть страховочная ставка
+        if cancelled_fights and insurance_bet and not used_insurance:
+            # Используем страховочную ставку для первого отмененного боя
+            fight = fights_dict.get(insurance_bet.fight_id)
+            if fight and fight.winner == str(insurance_bet.chosen_fighter):
+                points = float(insurance_bet.odds_at_bet) if insurance_bet.odds_at_bet else 0.0
+                total_points += points
+                insurance_bet.status = 'win'
+                insurance_bet.points_earned = points
+                used_insurance = True
+            else:
+                insurance_bet.status = 'lose'
+                insurance_bet.points_earned = 0.0
+        
+        await session.commit()
+        return total_points
+        
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Ошибка расчета очков: {e}")
+        return 0.0
+
+async def is_event_finished(session: AsyncSession, event_id: int) -> bool:
+    """
+    Проверяет, завершен ли турнир
+    Критерии: все бои имеют результат (winner не None)
+    """
+    try:
+        fights = await get_fights_for_event(session, event_id)
+        
+        if not fights:
+            return False  # Нет боев - не завершен
+        
+        # Проверяем, есть ли бои без результата
+        for fight in fights:
+            if fight.winner is None:
+                return False  # Нашли бой без результата
+        
+        return True  # Все бои имеют результат
+        
+    except Exception as e:
+        logger.error(f"Ошибка проверки завершенности турнира: {e}")
+        return False
+
+async def mark_event_as_finished(session: AsyncSession, event_id: int) -> bool:
+    """
+    Помечает турнир как завершенный, если все бои имеют результаты
+    """
+    try:
+        if await is_event_finished(session, event_id):
+            event = await get_event_by_id(session, event_id)
+            if event and event.status != 'finished':
+                event.status = 'finished'
+                await session.commit()
+                logger.info(f"Турнир {event_id} помечен как завершенный")
+                return True
+        return False
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Ошибка пометки турнира как завершенного: {e}")
+        return False
+    
+async def get_unfinished_events(session: AsyncSession) -> List[Event]:
+    """
+    Получает незавершенные турниры (есть хотя бы один бой без результата)
+    """
+    # Получаем все турниры не в статусе 'finished'
+    result = await session.execute(
+        select(Event)
+        .where(Event.status != 'finished')
+        .order_by(Event.date_utc.desc())
+    )
+    events = result.scalars().all()
+    
+    # Фильтруем те, у которых действительно есть незавершенные бои
+    unfinished_events = []
+    for event in events:
+        fights = await get_fights_for_event(session, event.id)
+        if fights:
+            # Проверяем, есть ли бои без результата
+            has_unfinished_fights = any(fight.winner is None for fight in fights)
+            if has_unfinished_fights:
+                unfinished_events.append(event)
+    
+    return unfinished_events
+    
 if __name__ == "__main__":
     # Тест утилит
     import asyncio

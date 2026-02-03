@@ -547,11 +547,179 @@ async def process_archive(callback: CallbackQuery):
     """Показывает архив турниров"""
     try:
         await callback.answer()
-        text = "🏆 <b>Архив турниров</b>\n\nПока турниров нет."
-        await callback.message.edit_text(text, reply_markup=get_back_button(), parse_mode="HTML")
+        
+        from db_utils import async_session, get_finished_events
+        from database import Event
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            # Получаем завершенные турниры
+            result = await session.execute(
+                select(Event)
+                .where(Event.status == 'finished')
+                .order_by(Event.date_utc.desc())
+            )
+            events = result.scalars().all()
+            
+            if not events:
+                text = "🏆 <b>Архив турниров</b>\n\nПока завершенных турниров нет."
+                keyboard = get_back_button()
+            else:
+                text = "🏆 <b>Архив турниров</b>\n\nВыберите турнир для просмотра:\n\n"
+                
+                # Формируем список турниров
+                buttons = []
+                for event in events[:10]:  # Показываем последние 10
+                    date_str = event.date_utc.strftime('%d.%m.%Y')
+                    btn_text = f"{event.short_title} ({date_str})"
+                    callback_data = f"view_archive:{event.id}"
+                    buttons.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+                
+                buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
     except Exception as e:
-        logger.warning(f"Ошибка в process_archive: {e}")
+        logger.error(f"Ошибка в process_archive: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)[:100]}",
+            reply_markup=get_back_button()
+        )
 
+@dp.callback_query(lambda c: c.data.startswith("view_archive:"))
+async def process_view_archive(callback: CallbackQuery):
+    """Показывает детали турнира из архива"""
+    try:
+        event_id = int(callback.data.split(":")[1])
+        await callback.answer("📊 Загружаю результаты турнира...")
+        
+        from db_utils import async_session, get_event_by_id, get_fights_for_event, get_user_bets_for_event
+        from database import User, Bet
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            fights = await get_fights_for_event(session, event_id)
+            
+            if not event or not fights:
+                await callback.message.edit_text(
+                    "❌ Турнир не найден",
+                    reply_markup=get_back_button()
+                )
+                return
+            
+            # Получаем всех пользователей
+            users_result = await session.execute(select(User))
+            all_users = users_result.scalars().all()
+            
+            # Получаем все ставки на этот турнир
+            all_bets_result = await session.execute(
+                select(Bet).where(Bet.event_id == event_id)
+            )
+            all_bets = all_bets_result.scalars().all()
+            
+            # Группируем ставки по пользователям
+            bets_by_user = {}
+            for bet in all_bets:
+                if bet.user_id not in bets_by_user:
+                    bets_by_user[bet.user_id] = []
+                bets_by_user[bet.user_id].append(bet)
+            
+            # Словарь боев
+            fights_dict = {f.id: f for f in fights}
+            
+            # Формируем текст
+            text = f"🏆 <b>Архив: {event.title}</b>\n"
+            text += f"📅 {event.date_utc.strftime('%d.%m.%Y')}\n\n"
+            
+            # Результаты боев
+            text += "<b>Результаты боев:</b>\n"
+            for fight in fights:
+                result_icon = ""
+                if fight.winner == '1':
+                    result_icon = "👊"
+                    result_text = f"{fight.fighter1_name} победил"
+                elif fight.winner == '2':
+                    result_icon = "🥊"
+                    result_text = f"{fight.fighter2_name} победил"
+                elif fight.winner == 'draw':
+                    result_icon = "🤝"
+                    result_text = "Ничья"
+                elif fight.winner in ['nc', 'cancelled']:
+                    result_icon = "❌"
+                    result_text = "Не состоялся"
+                else:
+                    result_icon = "❓"
+                    result_text = "Нет результата"
+                
+                text += f"{fight.fight_order}. {fight.fighter1_name} vs {fight.fighter2_name}\n"
+                text += f"   {result_icon} {result_text}\n"
+                if fight.odds1 and fight.odds2:
+                    text += f"   Коэффициенты: {fight.odds1:.2f}/{fight.odds2:.2f}\n"
+                text += "\n"
+            
+            # Ставки и результаты игроков
+            text += "<b>Результаты игроков:</b>\n\n"
+            
+            for user in all_users:
+                username = user.username or user.full_name or f"Игрок {user.user_id}"
+                text += f"<b>{username}:</b>\n"
+                
+                if user.user_id in bets_by_user:
+                    user_bets = bets_by_user[user.user_id]
+                    main_bets = [b for b in user_bets if b.bet_type == 'main']
+                    insurance_bet = next((b for b in user_bets if b.bet_type == 'insurance'), None)
+                    
+                    # Основные ставки
+                    for bet in main_bets:
+                        fight = fights_dict.get(bet.fight_id)
+                        if fight:
+                            fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
+                            
+                            # Проверяем результат
+                            if fight.winner == str(bet.chosen_fighter):
+                                result_icon = "✅"
+                                points = f"+{bet.odds_at_bet:.2f}"
+                            elif fight.winner in ['draw', 'nc', 'cancelled', None]:
+                                result_icon = "➖"
+                                points = "0.00"
+                            else:
+                                result_icon = "❌"
+                                points = "0.00"
+                            
+                            text += f"{result_icon} Бой {fight.fight_order}: {fighter_name} ({points})\n"
+                    
+                    # Страховочная ставка (только если сработала)
+                    if insurance_bet:
+                        fight = fights_dict.get(insurance_bet.fight_id)
+                        if fight:
+                            # Проверяем, заменила ли страховка какой-то бой
+                            # (логика замены - если основной бой draw/nc/cancelled)
+                            # Пока просто показываем
+                            fighter_name = fight.fighter1_name if insurance_bet.chosen_fighter == 1 else fight.fighter2_name
+                            text += f"🛡️ Страховка (бой {fight.fight_order}): {fighter_name}\n"
+                else:
+                    text += "Ставок не делал\n"
+                
+                text += "\n"
+            
+            # Кнопки
+            buttons = [
+                [InlineKeyboardButton(text="📊 Общая таблица", callback_data=f"archive_table:{event_id}")],
+                [InlineKeyboardButton(text="⬅️ Назад в архив", callback_data="menu_archive")]
+            ]
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в view_archive: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)[:100]}",
+            reply_markup=get_back_button()
+        )
+        
 @dp.callback_query(lambda c: c.data == "menu_back")
 async def process_back(callback: CallbackQuery):
     """Возврат в главное меню"""
@@ -1695,6 +1863,55 @@ async def process_confirm_main(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка в confirm_main: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.message(Command("updateresults"))
+async def cmd_update_results(message: Message):
+    """Обновление результатов всех незавершенных турниров"""
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    
+    await message.answer("🔄 Проверяю незавершенные турниры...")
+    
+    try:
+        from db_utils import async_session, update_event_results_from_api, get_unfinished_events
+        
+        async with async_session() as session:
+            # Получаем незавершенные турниры
+            unfinished_events = await get_unfinished_events(session)
+            
+            if not unfinished_events:
+                await message.answer("✅ Все турниры уже завершены!")
+                return
+            
+            updated = []
+            failed = []
+            
+            for event in unfinished_events:
+                success = await update_event_results_from_api(session, event)
+                if success:
+                    updated.append(event.title)
+                else:
+                    failed.append(event.title)
+            
+            # Формируем отчет
+            report = f"📊 <b>Обновление результатов</b>\n\n"
+            report += f"Проверено турниров: {len(unfinished_events)}\n\n"
+            
+            if updated:
+                report += f"✅ <b>Обновлены результаты:</b>\n"
+                for title in updated:
+                    report += f"• {title}\n"
+            
+            if failed:
+                report += f"\n❌ <b>Не удалось обновить:</b>\n"
+                for title in failed:
+                    report += f"• {title}\n"
+            
+            await message.answer(report, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка обновления результатов: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ ====================
 

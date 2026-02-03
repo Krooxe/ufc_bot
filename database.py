@@ -1,7 +1,7 @@
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime, ForeignKey, Text, DECIMAL
+from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime, ForeignKey, Text, DECIMAL, Index
 from datetime import datetime
 import config
 
@@ -80,6 +80,28 @@ class Setting(Base):
     key = Column(String(100), primary_key=True)
     value = Column(Text)
 
+class FightResult(Base):
+    """Таблица для хранения результатов боев из API (архив)"""
+    __tablename__ = "fight_results"
+    
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"))
+    fight_order = Column(Integer)
+    fighter1_name = Column(String(200), nullable=False)
+    fighter2_name = Column(String(200), nullable=False)
+    odds1 = Column(DECIMAL(10, 2))
+    odds2 = Column(DECIMAL(10, 2))
+    winner = Column(String(20))  # '1', '2', 'draw', 'nc', 'cancelled'
+    method = Column(String(100))  # KO, submission, decision и т.д.
+    round_ended = Column(Integer)
+    time_ended = Column(String(20))
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # Индекс для быстрого поиска
+    __table_args__ = (
+        Index('idx_event_fight', 'event_id', 'fight_order'),
+    )
+    
 # ==================== УТИЛИТЫ ====================
 
 async def create_tables():
