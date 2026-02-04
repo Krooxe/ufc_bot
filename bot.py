@@ -56,7 +56,7 @@ def get_admin_menu() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="➕ Новый PPV", callback_data="admin_new_ppv")],
         [InlineKeyboardButton(text="📥 Ввести кэфы", callback_data="admin_add_odds")],
-        [InlineKeyboardButton(text="🏁 Результаты", callback_data="admin_results")],
+        [InlineKeyboardButton(text="🏁 Закрыть турнир", callback_data="admin_close_event")],  # НОВАЯ КНОПКА
         [InlineKeyboardButton(text="📢 Объявление", callback_data="admin_announce")],
         [InlineKeyboardButton(text="ℹ️ Статус", callback_data="admin_status")],
         [InlineKeyboardButton(text="✖️ Выход", callback_data="menu_back")]
@@ -532,16 +532,6 @@ async def process_my_bets_detail(callback: CallbackQuery):
             reply_markup=get_back_button()
         )
 
-@dp.callback_query(lambda c: c.data == "menu_rating")
-async def process_rating(callback: CallbackQuery):
-    """Показывает общий рейтинг"""
-    try:
-        await callback.answer()
-        text = "📈 <b>Общий рейтинг</b>\n\n1. @example — 100.50 очков\n2. Ты — 0.00 очков"
-        await callback.message.edit_text(text, reply_markup=get_back_button(), parse_mode="HTML")
-    except Exception as e:
-        logger.warning(f"Ошибка в process_rating: {e}")
-
 @dp.callback_query(lambda c: c.data == "menu_archive")
 async def process_archive(callback: CallbackQuery):
     """Показывает архив турниров"""
@@ -626,17 +616,18 @@ async def process_view_archive(callback: CallbackQuery):
                     bets_by_user[bet.user_id] = []
                 bets_by_user[bet.user_id].append(bet)
             
-            # Словарь боев
+            # Словарь боев для быстрого поиска
             fights_dict = {f.id: f for f in fights}
             
             # Формируем текст
             text = f"🏆 <b>Архив: {event.title}</b>\n"
-            text += f"📅 {event.date_utc.strftime('%d.%m.%Y')}\n\n"
+            text += f"📅 {event.date_utc.strftime('%d.%m.%Y')}\n"
+            text += f"📊 Статус: <b>{event.status}</b>\n\n"
             
             # Результаты боев
             text += "<b>Результаты боев:</b>\n"
             for fight in fights:
-                result_icon = ""
+                # Определяем иконку результата
                 if fight.winner == '1':
                     result_icon = "👊"
                     result_text = f"{fight.fighter1_name} победил"
@@ -653,62 +644,167 @@ async def process_view_archive(callback: CallbackQuery):
                     result_icon = "❓"
                     result_text = "Нет результата"
                 
-                text += f"{fight.fight_order}. {fight.fighter1_name} vs {fight.fighter2_name}\n"
-                text += f"   {result_icon} {result_text}\n"
-                if fight.odds1 and fight.odds2:
-                    text += f"   Коэффициенты: {fight.odds1:.2f}/{fight.odds2:.2f}\n"
+                # Выводим информацию о бое
+                text += f"<b>{fight.fight_order}. {fight.fighter1_name} vs {fight.fighter2_name}</b>\n"
+                text += f"   {result_icon} <i>{result_text}</i>\n"
+                
+                # Коэффициенты если есть
+                if fight.odds1 is not None and fight.odds2 is not None:
+                    text += f"   Коэффициенты: {fight.odds1:.2f} / {fight.odds2:.2f}\n"
+                
                 text += "\n"
             
-            # Ставки и результаты игроков
+            # Результаты игроков с НАКОПЛЕННЫМИ ОЧКАМИ
             text += "<b>Результаты игроков:</b>\n\n"
+            
+            # Собираем данные по каждому игроку
+            players_data = []
             
             for user in all_users:
                 username = user.username or user.full_name or f"Игрок {user.user_id}"
-                text += f"<b>{username}:</b>\n"
                 
                 if user.user_id in bets_by_user:
                     user_bets = bets_by_user[user.user_id]
+                    
+                    # Разделяем ставки
                     main_bets = [b for b in user_bets if b.bet_type == 'main']
                     insurance_bet = next((b for b in user_bets if b.bet_type == 'insurance'), None)
                     
-                    # Основные ставки
+                    # Сортируем основные ставки по fight_order
+                    sorted_main_bets = []
                     for bet in main_bets:
                         fight = fights_dict.get(bet.fight_id)
                         if fight:
-                            fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                            
-                            # Проверяем результат
-                            if fight.winner == str(bet.chosen_fighter):
-                                result_icon = "✅"
-                                points = f"+{bet.odds_at_bet:.2f}"
-                            elif fight.winner in ['draw', 'nc', 'cancelled', None]:
-                                result_icon = "➖"
-                                points = "0.00"
-                            else:
-                                result_icon = "❌"
-                                points = "0.00"
-                            
-                            text += f"{result_icon} Бой {fight.fight_order}: {fighter_name} ({points})\n"
+                            sorted_main_bets.append({
+                                'bet': bet,
+                                'fight_order': fight.fight_order,
+                                'fight': fight
+                            })
                     
-                    # Страховочная ставка (только если сработала)
+                    sorted_main_bets.sort(key=lambda x: x['fight_order'])
+                    
+                    # Считаем очки за этот турнир
+                    tournament_points = 0.0
+                    bet_details = []
+                    
+                    # Обрабатываем основные ставки
+                    for item in sorted_main_bets:
+                        bet = item['bet']
+                        fight = item['fight']
+                        fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
+                        
+                        # Определяем результат ставки
+                        if bet.status == 'win' and bet.points_earned:
+                            result_icon = "✅"
+                            points = float(bet.points_earned)
+                            points_text = f"+{points:.2f}"
+                            tournament_points += points
+                        elif bet.status == 'lose':
+                            result_icon = "❌"
+                            points_text = "0.00"
+                        elif bet.status == 'cancelled':
+                            result_icon = "➖"
+                            points_text = "0.00"
+                        else:
+                            result_icon = "❓"
+                            points_text = "?"
+                        
+                        bet_details.append(f"{result_icon} Бой {fight.fight_order}: {fighter_name} ({points_text})")
+                    
+                    # Обрабатываем страховочную ставку
                     if insurance_bet:
                         fight = fights_dict.get(insurance_bet.fight_id)
                         if fight:
-                            # Проверяем, заменила ли страховка какой-то бой
-                            # (логика замены - если основной бой draw/nc/cancelled)
-                            # Пока просто показываем
                             fighter_name = fight.fighter1_name if insurance_bet.chosen_fighter == 1 else fight.fighter2_name
-                            text += f"🛡️ Страховка (бой {fight.fight_order}): {fighter_name}\n"
+                            
+                            if insurance_bet.status == 'win' and insurance_bet.points_earned:
+                                points = float(insurance_bet.points_earned)
+                                bet_details.append(f"🛡️ Страховка (бой {fight.fight_order}): {fighter_name} (+{points:.2f})")
+                                tournament_points += points
+                            elif insurance_bet.status == 'win':
+                                bet_details.append(f"🛡️ Страховка (бой {fight.fight_order}): {fighter_name} (+0.00)")
+                            else:
+                                bet_details.append(f"🛡️ Страховка (бой {fight.fight_order}): {fighter_name} (не понадобилась)")
+                    
+                    # Считаем НАКОПЛЕННЫЕ очки за год (до этого турнира включительно)
+                    from sqlalchemy import select as sql_select, func
+                    from database import Bet as BetModel, Event as EventModel
+                    
+                    year_points_result = await session.execute(
+                        sql_select(func.sum(BetModel.points_earned))
+                        .join(EventModel, BetModel.event_id == EventModel.id)
+                        .where(
+                            BetModel.user_id == user.user_id,
+                            EventModel.year == event.year,
+                            EventModel.date_utc <= event.date_utc  # Все турниры этого года до текущего включительно
+                        )
+                    )
+                    year_points = year_points_result.scalar() or 0.0
+                    accumulated_points = float(year_points)
+                    
+                    players_data.append({
+                        'user': user,
+                        'username': username,
+                        'tournament_points': tournament_points,
+                        'accumulated_points': accumulated_points,
+                        'bet_details': bet_details,
+                        'has_bets': True
+                    })
+                    
                 else:
-                    text += "Ставок не делал\n"
+                    # Игрок без ставок
+                    players_data.append({
+                        'user': user,
+                        'username': username,
+                        'tournament_points': 0.0,
+                        'accumulated_points': 0.0,
+                        'bet_details': ["Ставок не делал"],
+                        'has_bets': False
+                    })
+            
+            # Сортируем игроков по очкам за турнир (по убыванию)
+            players_data.sort(key=lambda x: x['tournament_points'], reverse=True)
+            
+            # Выводим отсортированных игроков
+            for i, player in enumerate(players_data, 1):
+                medal = ""
+                if i == 1 and player['tournament_points'] > 0:
+                    medal = "🥇"
+                elif i == 2 and player['tournament_points'] > 0:
+                    medal = "🥈"
+                elif i == 3 and player['tournament_points'] > 0:
+                    medal = "🥉"
+                
+                text += f"{medal} <b>{i}. {player['username']}</b>\n"
+                text += f"   <i>Турнир:</i> {player['tournament_points']:.2f} очков\n"
+                text += f"   <i>Накоплено в {event.year} году:</i> {player['accumulated_points']:.2f} очков\n"
+                
+                # Выводим детали ставок
+                for detail in player['bet_details']:
+                    text += f"   {detail}\n"
                 
                 text += "\n"
             
+            # Статистика турнира
+            text += "<b>📊 Статистика турнира:</b>\n"
+            players_with_bets = sum(1 for p in players_data if p['has_bets'])
+            max_points = max((p['tournament_points'] for p in players_data), default=0)
+            avg_points = sum(p['tournament_points'] for p in players_data) / len(players_data) if players_data else 0
+            
+            text += f"• Участников: {len(players_data)}\n"
+            text += f"• Сделали ставки: {players_with_bets}\n"
+            text += f"• Максимум очков: {max_points:.2f}\n"
+            text += f"• Среднее: {avg_points:.2f} очков\n"
+            
             # Кнопки
             buttons = [
-                [InlineKeyboardButton(text="📊 Общая таблица", callback_data=f"archive_table:{event_id}")],
                 [InlineKeyboardButton(text="⬅️ Назад в архив", callback_data="menu_archive")]
             ]
+            
+            # Если пользователь админ, показываем дополнительные кнопки
+            if callback.from_user.id == config.ADMIN_ID:
+                buttons.insert(0, [InlineKeyboardButton(text="⚙️ Админ: Пересчитать всё", callback_data=f"admin_recalculate:{event_id}")])
+            
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -720,6 +816,63 @@ async def process_view_archive(callback: CallbackQuery):
             reply_markup=get_back_button()
         )
         
+@dp.callback_query(lambda c: c.data == "menu_rating")
+async def process_rating(callback: CallbackQuery):
+    """Показывает общий рейтинг (накопленные очки за текущий год)"""
+    try:
+        await callback.answer()
+        
+        from db_utils import async_session
+        from database import User, Bet, Event
+        from sqlalchemy import select, func
+        from datetime import datetime
+        
+        async with async_session() as session:
+            current_year = datetime.now().year
+            
+            # Получаем пользователей с их общим балансом за текущий год
+            query = (
+                select(
+                    User.user_id,
+                    User.username,
+                    User.full_name,
+                    func.coalesce(func.sum(Bet.points_earned), 0).label('total_points')
+                )
+                .join(Bet, Bet.user_id == User.user_id, isouter=True)
+                .join(Event, Bet.event_id == Event.id, isouter=True)
+                .where(
+                    (Event.year == current_year) | (Event.id.is_(None))
+                )
+                .group_by(User.user_id, User.username, User.full_name)
+                .order_by(func.coalesce(func.sum(Bet.points_earned), 0).desc())
+            )
+            
+            result = await session.execute(query)
+            users_with_points = result.all()
+            
+            if not users_with_points:
+                text = "📈 <b>Общий рейтинг</b>\n\nПока нет данных за текущий год."
+            else:
+                text = f"📈 <b>Общие итоги ({current_year} год)</b>\n\n"
+                
+                for i, (user_id, username, full_name, total_points) in enumerate(users_with_points, 1):
+                    # Используем лучшее доступное имя
+                    display_name = username or full_name or f"Игрок {user_id}"
+                    
+                    # Форматируем очки
+                    points_value = float(total_points) if total_points else 0.0
+                    
+                    text += f"<b>{i}. {display_name}: {points_value:.2f}</b>\n"
+        
+        await callback.message.edit_text(text, reply_markup=get_back_button(), parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в process_rating: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)[:100]}",
+            reply_markup=get_back_button()
+        )
+
 @dp.callback_query(lambda c: c.data == "menu_back")
 async def process_back(callback: CallbackQuery):
     """Возврат в главное меню"""
@@ -730,9 +883,79 @@ async def process_back(callback: CallbackQuery):
         logger.warning(f"Ошибка в process_back: {e}")
 
 # ==================== ОБРАБОТЧИКИ АДМИНСКИХ КНОПОК ====================
+@dp.callback_query(lambda c: c.data == "admin_close_event")
+async def process_admin_close_event(callback: CallbackQuery):
+    """Закрытие турнира - выбор из списка"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        await callback.answer("🏁 Выбор турнира для закрытия")
+        
+        from db_utils import async_session, get_unfinished_events
+        from database import Event, Fight
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            # Получаем незавершенные турниры
+            unfinished_events = await get_unfinished_events(session)
+            
+            if not unfinished_events:
+                text = (
+                    "🏁 <b>Закрытие турнира</b>\n\n"
+                    "Нет турниров для закрытия.\n"
+                    "Все турниры уже завершены или пока нет активных."
+                )
+                keyboard = get_admin_menu()
+            else:
+                text = "🏁 <b>Выберите турнир для закрытия:</b>\n\n"
+                
+                buttons = []
+                for event in unfinished_events:
+                    # Получаем статистику по боям
+                    fights_result = await session.execute(
+                        select(Fight).where(Fight.event_id == event.id)
+                    )
+                    fights = fights_result.scalars().all()
+                    
+                    # Считаем бои с результатами и без
+                    total_fights = len(fights)
+                    finished_fights = sum(1 for f in fights if f.winner is not None)
+                    
+                    btn_text = (
+                        f"{event.short_title} ({event.date_utc.strftime('%d.%m')}) - "
+                        f"{finished_fights}/{total_fights} боев"
+                    )
+                    
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text=btn_text,
+                            callback_data=f"admin_confirm_close:{event.id}"
+                        )
+                    ])
+                
+                buttons.append([
+                    InlineKeyboardButton(text="↩️ Назад", callback_data="admin_status")
+                ])
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_close_event: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
 
-@dp.callback_query(lambda c: c.data.startswith("admin_") and not c.data.startswith("admin_input_odds:") and
-                   c.data != "admin_create_draft")
+@dp.callback_query(lambda c: c.data.startswith("admin_") 
+                   and not c.data.startswith("admin_input_odds:") 
+                   and not c.data.startswith("admin_confirm_close:")
+                   and not c.data.startswith("admin_execute_close:")
+                   and not c.data.startswith("admin_update_single:")
+                   and not c.data.startswith("admin_calculate_points:")
+                   and c.data != "admin_create_draft"
+                   and c.data != "admin_close_event"
+                   and c.data != "admin_update_all")
 async def process_admin_commands(callback: CallbackQuery):
     """Обработка всех админских команд"""
     logger.info(f"Админ-кнопка: {callback.data} от user_id={callback.from_user.id}")
@@ -906,6 +1129,210 @@ async def process_admin_commands(callback: CallbackQuery):
             
     except Exception as e:
         logger.warning(f"Ошибка в админ-команде: {e}")
+
+@dp.callback_query(lambda c: c.data.startswith("admin_confirm_close:"))
+async def process_admin_confirm_close(callback: CallbackQuery):
+    """Подтверждение закрытия турнира"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        
+        from db_utils import async_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
+        from database import Event, Fight
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            # Получаем бои
+            fights = await get_fights_for_event(session, event_id)
+            
+            # Считаем статистику
+            total_fights = len(fights)
+            finished_fights = sum(1 for f in fights if f.winner is not None)
+            unfinished_fights = total_fights - finished_fights
+            
+            text = (
+                f"🏁 <b>Подтверждение закрытия турнира</b>\n\n"
+                f"<b>{event.title}</b>\n"
+                f"Дата: {event.date_utc.strftime('%d.%m.%Y')}\n"
+                f"Статус: {event.status}\n\n"
+                f"<b>Статистика боев:</b>\n"
+                f"• Всего боев: {total_fights}\n"
+                f"• С результатами: {finished_fights}\n"
+                f"• Без результатов: {unfinished_fights}\n\n"
+            )
+            
+            if unfinished_fights > 0:
+                text += (
+                    f"⚠️ <b>Внимание!</b> {unfinished_fights} боев без результатов.\n"
+                    f"При закрытии им будут присвоены результаты 'nc' (не состоялся).\n\n"
+                )
+            
+            text += "Вы уверены, что хотите закрыть турнир?"
+            
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        text="✅ Да, закрыть турнир", 
+                        callback_data=f"admin_execute_close:{event_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🔄 Сначала обновить из API", 
+                        callback_data=f"admin_update_single:{event_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_close_event")
+                ]
+            ]
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_confirm_close: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("admin_execute_close:"))
+async def process_admin_execute_close(callback: CallbackQuery):
+    """Выполнение закрытия турнира"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        await callback.answer("🔄 Закрываю турнир и считаю очки...")
+        
+        from db_utils import async_session, get_event_by_id, get_fights_for_event, mark_event_as_finished, calculate_user_points_for_event, update_event_results_from_api
+        from database import Fight, User
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            # 1. Сначала обновляем результаты из API (если есть новые)
+            await update_event_results_from_api(session, event)
+            
+            # 2. Получаем бои без результатов
+            fights_result = await session.execute(
+                select(Fight).where(
+                    Fight.event_id == event_id,
+                    Fight.winner.is_(None)
+                )
+            )
+            unfinished_fights = fights_result.scalars().all()
+            
+            # 3. Проставляем 'nc' для боев без результатов
+            for fight in unfinished_fights:
+                fight.winner = 'nc'
+            
+            # 4. Помечаем турнир как завершенный (форсируем, даже если is_event_finished вернёт False)
+            event.status = 'finished'
+            await session.commit()
+            
+            # 5. Считаем очки для всех игроков
+            users_result = await session.execute(select(User))
+            all_users = users_result.scalars().all()
+            
+            total_points_calculated = 0
+            for user in all_users:
+                points = await calculate_user_points_for_event(session, user.user_id, event_id)
+                if points > 0:
+                    total_points_calculated += 1
+            
+            text = (
+                f"✅ <b>Турнир закрыт!</b>\n\n"
+                f"<b>{event.title}</b> теперь завершен.\n"
+                f"Статус: <b>finished</b>\n"
+                f"Обновлено боев: {len(unfinished_fights)}\n"
+                f"Посчитаны очки для: {total_points_calculated} игроков\n\n"
+                f"Результаты уже доступны в архиве."
+            )
+            
+            # Кнопки
+            buttons = [
+                [InlineKeyboardButton(text="📊 Посмотреть архив", callback_data=f"view_archive:{event_id}")],
+                [InlineKeyboardButton(text="📈 Общий рейтинг", callback_data="menu_rating")],
+                [InlineKeyboardButton(text="↩️ В админ-панель", callback_data="admin_status")]
+            ]
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+            logger.info(f"Турнир {event_id} закрыт, очки посчитаны")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_execute_close: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка:</b> {str(e)[:200]}",
+            reply_markup=get_admin_menu(),
+            parse_mode="HTML"
+        )
+
+@dp.callback_query(lambda c: c.data.startswith("admin_update_single:"))
+async def process_admin_update_single(callback: CallbackQuery):
+    """Обновление одного турнира из API"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        await callback.answer("🔄 Обновляю из API...")
+        
+        from db_utils import async_session, get_event_by_id, update_event_results_from_api
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            success = await update_event_results_from_api(session, event)
+            
+            if success:
+                text = (
+                    f"✅ <b>Турнир обновлен из API!</b>\n\n"
+                    f"<b>{event.title}</b>\n"
+                    f"Результаты успешно загружены.\n\n"
+                    f"Теперь можно закрыть турнир."
+                )
+                
+                buttons = [
+                    [InlineKeyboardButton(text="🏁 Закрыть турнир", callback_data=f"admin_confirm_close:{event_id}")],
+                    [InlineKeyboardButton(text="↩️ Назад к списку", callback_data="admin_close_event")]
+                ]
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            else:
+                text = (
+                    f"❌ <b>Не удалось обновить из API</b>\n\n"
+                    f"<b>{event.title}</b>\n"
+                    f"API не вернул результатов или произошла ошибка.\n\n"
+                    f"Можно закрыть турнир вручную."
+                )
+                
+                buttons = [
+                    [InlineKeyboardButton(text="🏁 Закрыть вручную", callback_data=f"admin_confirm_close:{event_id}")],
+                    [InlineKeyboardButton(text="↩️ Назад к списку", callback_data="admin_close_event")]
+                ]
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_update_single: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "admin_create_draft")
 async def process_create_draft(callback: CallbackQuery):
@@ -1912,6 +2339,298 @@ async def cmd_update_results(message: Message):
     except Exception as e:
         logger.error(f"Ошибка обновления результатов: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {str(e)[:100]}")
+
+@dp.callback_query(lambda c: c.data == "admin_close_event")
+async def process_admin_close_event(callback: CallbackQuery):
+    """Закрытие турнира - выбор из списка"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        await callback.answer("🏁 Выбор турнира для закрытия")
+        
+        from db_utils import async_session, get_unfinished_events
+        from database import Event, Fight
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            # Получаем незавершенные турниры
+            unfinished_events = await get_unfinished_events(session)
+            
+            if not unfinished_events:
+                text = (
+                    "🏁 <b>Закрытие турнира</b>\n\n"
+                    "Нет турниров для закрытия.\n"
+                    "Все турниры уже завершены или пока нет активных."
+                )
+                keyboard = get_admin_menu()
+            else:
+                text = "🏁 <b>Выберите турнир для закрытия:</b>\n\n"
+                
+                buttons = []
+                for event in unfinished_events:
+                    # Получаем статистику по боям
+                    fights_result = await session.execute(
+                        select(Fight).where(Fight.event_id == event.id)
+                    )
+                    fights = fights_result.scalars().all()
+                    
+                    # Считаем бои с результатами и без
+                    total_fights = len(fights)
+                    finished_fights = sum(1 for f in fights if f.winner is not None)
+                    
+                    btn_text = (
+                        f"{event.short_title} ({event.date_utc.strftime('%d.%m')}) - "
+                        f"{finished_fights}/{total_fights} боев"
+                    )
+                    
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text=btn_text,
+                            callback_data=f"admin_confirm_close:{event.id}"
+                        )
+                    ])
+                
+                buttons.append([
+                    InlineKeyboardButton(text="🔄 Обновить все автоматически", callback_data="admin_update_all")
+                ])
+                buttons.append([
+                    InlineKeyboardButton(text="↩️ Назад", callback_data="admin_status")
+                ])
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_close_event: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("admin_confirm_close:"))
+async def process_admin_confirm_close(callback: CallbackQuery):
+    """Подтверждение закрытия турнира"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        
+        from db_utils import async_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
+        from database import Event, Fight
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            # Получаем бои
+            fights = await get_fights_for_event(session, event_id)
+            
+            # Считаем статистику
+            total_fights = len(fights)
+            finished_fights = sum(1 for f in fights if f.winner is not None)
+            unfinished_fights = total_fights - finished_fights
+            
+            text = (
+                f"🏁 <b>Подтверждение закрытия турнира</b>\n\n"
+                f"<b>{event.title}</b>\n"
+                f"Дата: {event.date_utc.strftime('%d.%m.%Y')}\n"
+                f"Статус: {event.status}\n\n"
+                f"<b>Статистика боев:</b>\n"
+                f"• Всего боев: {total_fights}\n"
+                f"• С результатами: {finished_fights}\n"
+                f"• Без результатов: {unfinished_fights}\n\n"
+            )
+            
+            if unfinished_fights > 0:
+                text += (
+                    f"⚠️ <b>Внимание!</b> {unfinished_fights} боев без результатов.\n"
+                    f"При закрытии им будут присвоены результаты 'nc' (не состоялся).\n\n"
+                )
+            
+            text += "Вы уверены, что хотите закрыть турнир?"
+            
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        text="✅ Да, закрыть турнир", 
+                        callback_data=f"admin_execute_close:{event_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🔄 Сначала обновить из API", 
+                        callback_data=f"admin_update_single:{event_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_close_event")
+                ]
+            ]
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_confirm_close: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("admin_update_single:"))
+async def process_admin_update_single(callback: CallbackQuery):
+    """Обновление одного турнира из API"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        await callback.answer("🔄 Обновляю из API...")
+        
+        from db_utils import async_session, get_event_by_id, update_event_results_from_api
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            success = await update_event_results_from_api(session, event)
+            
+            if success:
+                text = (
+                    f"✅ <b>Турнир обновлен из API!</b>\n\n"
+                    f"<b>{event.title}</b>\n"
+                    f"Результаты успешно загружены.\n\n"
+                    f"Теперь можно закрыть турнир."
+                )
+                
+                buttons = [
+                    [InlineKeyboardButton(text="🏁 Закрыть турнир", callback_data=f"admin_confirm_close:{event_id}")],
+                    [InlineKeyboardButton(text="↩️ Назад к списку", callback_data="admin_close_event")]
+                ]
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            else:
+                text = (
+                    f"❌ <b>Не удалось обновить из API</b>\n\n"
+                    f"<b>{event.title}</b>\n"
+                    f"API не вернул результатов или произошла ошибка.\n\n"
+                    f"Можно закрыть турнир вручную."
+                )
+                
+                buttons = [
+                    [InlineKeyboardButton(text="🏁 Закрыть вручную", callback_data=f"admin_confirm_close:{event_id}")],
+                    [InlineKeyboardButton(text="↩️ Назад к списку", callback_data="admin_close_event")]
+                ]
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_update_single: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith("admin_calculate_points:"))
+async def process_admin_calculate_points(callback: CallbackQuery):
+    """Расчет очков для турнира"""
+    try:
+        if callback.from_user.id != config.ADMIN_ID:
+            await callback.answer("⛔ Нет доступа!", show_alert=True)
+            return
+        
+        event_id = int(callback.data.split(":")[1])
+        await callback.answer("🧮 Считаю очки...")
+        
+        from db_utils import async_session, get_event_by_id, calculate_user_points_for_event
+        from database import User, Bet
+        from sqlalchemy import select
+        
+        async with async_session() as session:
+            event = await get_event_by_id(session, event_id)
+            if not event:
+                await callback.answer("❌ Турнир не найден", show_alert=True)
+                return
+            
+            # Получаем всех пользователей
+            users_result = await session.execute(select(User))
+            all_users = users_result.scalars().all()
+            
+            if not all_users:
+                await callback.message.edit_text(
+                    "❌ Нет пользователей для расчета очков",
+                    reply_markup=get_admin_menu()
+                )
+                return
+            
+            # Считаем очки для каждого пользователя
+            results = []
+            for user in all_users:
+                points = await calculate_user_points_for_event(session, user.user_id, event_id)
+                results.append({
+                    'user': user,
+                    'points': points
+                })
+            
+            # Сортируем по очкам (по убыванию)
+            results.sort(key=lambda x: x['points'], reverse=True)
+            
+            # Формируем текст с результатами
+            text = f"📊 <b>Результаты турнира: {event.title}</b>\n\n"
+            
+            for i, result in enumerate(results, 1):
+                user = result['user']
+                points = result['points']
+                
+                username = user.username or user.full_name or f"Игрок {user.user_id}"
+                medal = ""
+                if i == 1:
+                    medal = "🥇"
+                elif i == 2:
+                    medal = "🥈"
+                elif i == 3:
+                    medal = "🥉"
+                
+                text += f"{medal} <b>{i}. {username}:</b> {points:.2f} очков\n"
+            
+            # Обновляем общий баланс пользователей
+            for result in results:
+                user = result['user']
+                points = result['points']
+                
+                # Добавляем очки к общему балансу - КОРРЕКТНЫЕ ТИПЫ
+                if user.total_balance is None:
+                    user.total_balance = 0.0
+                else:
+                    # Приводим к float чтобы избежать проблем с Decimal
+                    user.total_balance = float(user.total_balance)
+                
+                user.total_balance += float(points)
+            
+            await session.commit()
+            
+            text += f"\n✅ <b>Очки рассчитаны и добавлены к общему балансу!</b>"
+            
+            # Кнопки
+            buttons = [
+                [InlineKeyboardButton(text="📊 Посмотреть архив", callback_data=f"view_archive:{event_id}")],
+                [InlineKeyboardButton(text="📈 Общий рейтинг", callback_data="menu_rating")],
+                [InlineKeyboardButton(text="↩️ В админ-панель", callback_data="admin_status")]
+            ]
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка расчета очков: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка расчета очков:</b>\n{str(e)[:200]}",
+            reply_markup=get_admin_menu(),
+            parse_mode="HTML"
+        )
+
+
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ ====================
 

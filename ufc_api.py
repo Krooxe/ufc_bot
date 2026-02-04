@@ -228,7 +228,7 @@ def get_test_ppv_event() -> Dict:
                     }
                 ]
             }
-            for i in range(1, 7)  # 5 тестовых боев
+            for i in range(1, 7)  # 6 тестовых боев
         ]
     }
 

@@ -569,20 +569,21 @@ async def get_events_needing_results(session: AsyncSession) -> List[Event]:
 async def calculate_user_points_for_event(session: AsyncSession, user_id: int, event_id: int) -> float:
     """
     Рассчитывает очки пользователя за турнир
-    По правилам:
-    - Угадал победителя: + коэффициент
-    - Не угадал: 0
-    - Бой draw/nc/cancelled: используется страховочная ставка если есть
     """
     try:
+        logger.info(f"РАСЧЕТ ОЧКОВ: user_id={user_id}, event_id={event_id}")
+        
         # Получаем все ставки пользователя на этот турнир
         bets = await get_user_bets_for_event(session, user_id, event_id)
+        logger.info(f"Найдено ставок: {len(bets)}")
+        
         if not bets:
             return 0.0
         
         # Получаем все бои турнира
         fights = await get_fights_for_event(session, event_id)
         fights_dict = {f.id: f for f in fights}
+        logger.info(f"Найдено боев: {len(fights)}")
         
         total_points = 0.0
         used_insurance = False
@@ -591,13 +592,18 @@ async def calculate_user_points_for_event(session: AsyncSession, user_id: int, e
         main_bets = [b for b in bets if b.bet_type == 'main']
         insurance_bet = next((b for b in bets if b.bet_type == 'insurance'), None)
         
+        logger.info(f"Основных ставок: {len(main_bets)}, Страховочная: {'есть' if insurance_bet else 'нет'}")
+        
         # Проверяем основные ставки
         cancelled_fights = []
         
         for bet in main_bets:
             fight = fights_dict.get(bet.fight_id)
             if not fight:
+                logger.warning(f"Бой {bet.fight_id} не найден для ставки {bet.id}")
                 continue
+            
+            logger.info(f"Проверка ставки {bet.id}: бой {fight.fight_order}, победитель={fight.winner}, выбрал={bet.chosen_fighter}")
             
             # Проверяем результат боя
             if fight.winner == str(bet.chosen_fighter):
@@ -605,47 +611,54 @@ async def calculate_user_points_for_event(session: AsyncSession, user_id: int, e
                 points = float(bet.odds_at_bet) if bet.odds_at_bet else 0.0
                 total_points += points
                 
-                # Обновляем статус ставки
+                # Обновляем статус ставки - КОРРЕКТНЫЙ ТИП ДАННЫХ
                 bet.status = 'win'
-                bet.points_earned = points
+                bet.points_earned = float(points)  # Важно: приводим к float
+                logger.info(f"✅ ВЫИГРЫШ: +{points} очков")
                 
             elif fight.winner in ['draw', 'nc', 'cancelled', None]:
-                # Бой не состоялся или нет результата - запоминаем для возможной замены страховкой
+                # Бой не состоялся или нет результата
                 cancelled_fights.append(bet.fight_id)
                 bet.status = 'cancelled'
-                bet.points_earned = 0.0
+                bet.points_earned = 0.0  # float вместо Decimal
+                logger.info(f"➖ ОТМЕНА: бой {fight.fight_order} - {fight.winner}")
                 
             else:
                 # Не угадал
                 bet.status = 'lose'
-                bet.points_earned = 0.0
+                bet.points_earned = 0.0  # float вместо Decimal
+                logger.info(f"❌ ПРОИГРЫШ")
         
         # Если есть отмененные бои и есть страховочная ставка
         if cancelled_fights and insurance_bet and not used_insurance:
-            # Используем страховочную ставку для первого отмененного боя
+            logger.info(f"Проверяем страховку для отмененных боев: {cancelled_fights}")
+            
             fight = fights_dict.get(insurance_bet.fight_id)
             if fight and fight.winner == str(insurance_bet.chosen_fighter):
                 points = float(insurance_bet.odds_at_bet) if insurance_bet.odds_at_bet else 0.0
                 total_points += points
                 insurance_bet.status = 'win'
-                insurance_bet.points_earned = points
+                insurance_bet.points_earned = float(points)  # float вместо Decimal
                 used_insurance = True
+                logger.info(f"🛡️ СТРАХОВКА СЫГРАЛА: +{points} очков")
             else:
                 insurance_bet.status = 'lose'
-                insurance_bet.points_earned = 0.0
+                insurance_bet.points_earned = 0.0  # float вместо Decimal
+                logger.info(f"🛡️ СТРАХОВКА НЕ СЫГРАЛА")
         
+        logger.info(f"ИТОГО ОЧКОВ: {total_points}")
         await session.commit()
         return total_points
         
     except Exception as e:
         await session.rollback()
-        logger.error(f"Ошибка расчета очков: {e}")
+        logger.error(f"Ошибка расчета очков: {e}", exc_info=True)
         return 0.0
 
 async def is_event_finished(session: AsyncSession, event_id: int) -> bool:
     """
     Проверяет, завершен ли турнир
-    Критерии: все бои имеют результат (winner не None)
+    Критерии: все бои имеют результат (winner не None и не пустая строка)
     """
     try:
         fights = await get_fights_for_event(session, event_id)
@@ -655,7 +668,8 @@ async def is_event_finished(session: AsyncSession, event_id: int) -> bool:
         
         # Проверяем, есть ли бои без результата
         for fight in fights:
-            if fight.winner is None:
+            # ⚠️ ИСПРАВЛЕНО: проверяем не только None, но и пустую строку
+            if fight.winner is None or fight.winner == '':
                 return False  # Нашли бой без результата
         
         return True  # Все бои имеют результат
@@ -666,16 +680,19 @@ async def is_event_finished(session: AsyncSession, event_id: int) -> bool:
 
 async def mark_event_as_finished(session: AsyncSession, event_id: int) -> bool:
     """
-    Помечает турнир как завершенный, если все бои имеют результаты
+    Помечает турнир как завершенный (форсированно)
     """
     try:
-        if await is_event_finished(session, event_id):
-            event = await get_event_by_id(session, event_id)
-            if event and event.status != 'finished':
-                event.status = 'finished'
-                await session.commit()
-                logger.info(f"Турнир {event_id} помечен как завершенный")
-                return True
+        event = await get_event_by_id(session, event_id)
+        if event and event.status != 'finished':
+            event.status = 'finished'
+            await session.commit()
+            logger.info(f"Турнир {event_id} помечен как завершенный")
+            return True
+        elif event and event.status == 'finished':
+            # Турнир уже завершен, возвращаем True
+            logger.info(f"Турнир {event_id} уже завершен")
+            return True
         return False
     except Exception as e:
         await session.rollback()
