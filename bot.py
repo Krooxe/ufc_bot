@@ -6,7 +6,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.fsm.storage.memory import MemoryStorage
 import config
 from database import create_tables
-from db_utils import async_session, get_fights_for_event, update_fight_odds_batch, open_event_for_bets, get_draft_events, create_event_from_api, get_event_by_id, get_events_for_odds_edit
+from db_utils import get_session, get_fights_for_event, update_fight_odds_batch, open_event_for_bets, get_draft_events, create_event_from_api, get_event_by_id, get_events_for_odds_edit
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -78,7 +78,21 @@ async def cmd_start(message: Message):
     )
     
     await message.answer(welcome_text, reply_markup=get_main_menu())
-    logger.info(f"Новый пользователь: {user.id} - {user.username}")
+    
+    # СОЗДАЁМ/ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ В БАЗЕ
+    try:
+        from db_utils import get_session, get_or_create_user
+        
+        async with get_session() as session:
+            db_user = await get_or_create_user(
+                session,
+                user.id,
+                user.username,
+                user.full_name
+            )
+            logger.info(f"Пользователь в БД: {db_user.user_id} - {db_user.username}")
+    except Exception as e:
+        logger.error(f"Ошибка создания пользователя: {e}")
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -102,70 +116,227 @@ async def cmd_admin(message: Message):
     await message.answer(text, reply_markup=get_admin_menu(), parse_mode="HTML")
     logger.info(f"Админ вошел: {message.from_user.id}")
 
-@dp.message(Command("createtest"))
-async def cmd_create_test(message: Message):
-    """Создание тестового турнира одной командой"""
+@dp.message(Command("generatetestdata"))
+async def cmd_generate_test_data(message: Message):
+    """Генерация тестовых архивных данных за прошлый и текущий год"""
     if message.from_user.id != config.ADMIN_ID:
         await message.answer("⛔ Только для админа")
         return
     
-    await message.answer("🛠️ Создаю тестовый турнир...")
+    await message.answer("🧪 Создаю тестовые архивные данные...")
     
     try:
-        from db_utils import create_event_from_api, async_session
-        from ufc_api import get_test_ppv_event, get_event_fights_from_espn
+        from db_utils import get_session, create_event_from_api
+        from ufc_api import get_test_ppv_event, get_event_fights_from_espn, get_test_results
+        from database import User, Bet, Fight, Event
+        from sqlalchemy import select
+        from datetime import datetime, timezone, timedelta
+        import random
         
-        event_data = get_test_ppv_event()
-        fights_data = get_event_fights_from_espn(event_data)
-        
-        async with async_session() as session:
-            event = await create_event_from_api(session, event_data, fights_data)
+        async with get_session() as session:
+            # СНАЧАЛА КОММИТИМ ВСЕ ОТКРЫТЫЕ ТРАНЗАКЦИИ
+            await session.commit()
+
+            # Получаем всех пользователей бота
+            users_result = await session.execute(select(User))
+            all_users = users_result.scalars().all()
             
-            if event:
-                fights_text = "\n".join([
-                    f"{i}. {fight.get('fighter1', {}).get('name')} vs {fight.get('fighter2', {}).get('name')}"
-                    for i, fight in enumerate(fights_data, 1)
-                ])
+            # ЛОГГИРУЕМ ДЛЯ ОТЛАДКИ
+            logger.info(f"=== DEBUG: Найдено пользователей: {len(all_users)} ===")
+            for i, user in enumerate(all_users, 1):
+                logger.info(f"Пользователь {i}: ID={user.user_id}, username={user.username}, full_name={user.full_name}")
+
+            if not all_users:
+                await message.answer("❌ Нет пользователей в базе. Сначала зайдите в бота.")
+                return
+            
+            current_year = datetime.now(timezone.utc).year
+            previous_year = current_year - 1
+            
+            # Создаем тестовые турниры
+            test_events = []
+            
+            # 2 турнира за предыдущий год
+            for i in range(2):
+                event_data = get_test_ppv_event()
+                # Меняем дату на прошлый год
+                old_date = datetime.now(timezone.utc) - timedelta(days=300 - i*50)
                 
-                await message.answer(
-                    f"✅ <b>Тестовый турнир создан!</b>\n\n"
-                    f"🏆 <b>{event.title}</b>\n"
-                    f"🆔 <b>ID:</b> {event.id}\n"
-                    f"📅 <b>Дата:</b> {event.date_utc.strftime('%d.%m.%Y')}\n"
-                    f"📊 <b>Статус:</b> {event.status}\n"
-                    f"🥊 <b>Боев:</b> {len(fights_data)}\n\n"
-                    f"<b>Список боев:</b>\n\n{fights_text}",
-                    parse_mode="HTML"
+                ufc_number = 200 + i  # UFC 200, UFC 201
+                event_data['date'] = old_date.replace(year=previous_year).isoformat().replace('+00:00', 'Z')
+                event_data['name'] = f"UFC {ufc_number}: Турнир {previous_year} года #{i+1}"
+                event_data['shortName'] = f"UFC {ufc_number}"
+                event_data['id'] = ufc_number  # ID = номеру UFC
+                
+                fights_data = get_event_fights_from_espn(event_data)
+                event = await create_event_from_api(session, event_data, fights_data)
+                
+                if event:
+                    # Открываем для ставок и сразу закрываем (прошлогодний)
+                    event.status = 'finished'
+                    
+                    # Генерируем результаты для каждого боя
+                    fights = await session.execute(
+                        select(Fight).where(Fight.event_id == event.id).order_by(Fight.fight_order)
+                    )
+                    fights_list = fights.scalars().all()
+                    
+                    # Тестовые результаты (разные для каждого турнира)
+                    for fight in fights_list:
+                        # Разные исходы для разнообразия
+                        rand = random.random()
+                        if rand < 0.05:  # 5% - ничья
+                            fight.winner = 'draw'
+                        elif rand < 0.1:  # 5% - не состоялся
+                            fight.winner = 'nc'
+                        elif rand < 0.15:  # 5% - отменен
+                            fight.winner = 'cancelled'
+                        else:
+                            fight.winner = '1' if random.random() > 0.5 else '2'
+                        
+                        # Коэффициенты
+                        fight.odds1 = round(1.3 + random.random() * 0.7, 2)
+                        fight.odds2 = round(1.5 + random.random() * 0.8, 2)
+                    
+                    test_events.append(event)
+            
+            # 2 турнира за текущий год
+            for i in range(2):
+                event_data = get_test_ppv_event()
+                # Меняем дату на недавнее прошлое
+                recent_date = datetime.now(timezone.utc) - timedelta(days=30 - i*15)
+                
+                ufc_number = 202 + i  # UFC 202, UFC 203
+                event_data['date'] = recent_date.replace(year=current_year).isoformat().replace('+00:00', 'Z')
+                event_data['name'] = f"UFC {ufc_number}: Турнир {current_year} года #{i+1}"
+                event_data['shortName'] = f"UFC {ufc_number}"
+                event_data['id'] = ufc_number  # ID = номеру UFC
+                
+                fights_data = get_event_fights_from_espn(event_data)
+                event = await create_event_from_api(session, event_data, fights_data)
+                
+                if event:
+                    event.status = 'finished'
+                    
+                    # Коэффициенты
+                    fights = await session.execute(
+                        select(Fight).where(Fight.event_id == event.id).order_by(Fight.fight_order)
+                    )
+                    fights_list = fights.scalars().all()
+                    
+                    for fight in fights_list:
+                        fight.odds1 = round(1.3 + random.random() * 0.7, 2)
+                        fight.odds2 = round(1.5 + random.random() * 0.8, 2)
+                        
+                        # Результаты (для текущего года - больше выигрышей)
+                        rand = random.random()
+                        if rand < 0.03:  # 3% - ничья
+                            fight.winner = 'draw'
+                        elif rand < 0.06:  # 3% - не состоялся
+                            fight.winner = 'nc'
+                        else:
+                            fight.winner = '1' if random.random() > 0.4 else '2'
+                    
+                    test_events.append(event)
+            
+            await session.commit()
+            
+            # Создаем тестовые ставки для каждого пользователя на каждый турнир
+            for user in all_users:
+                for event in test_events:
+                    # Проверяем, нет ли уже ставок
+                    existing_bets = await session.execute(
+                        select(Bet).where(
+                            Bet.user_id == user.user_id,
+                            Bet.event_id == event.id
+                        )
+                    )
+                    if existing_bets.scalar_one_or_none():
+                        continue  # Уже есть ставки
+                    
+                    # Получаем бои турнира
+                    fights = await session.execute(
+                        select(Fight)
+                        .where(Fight.event_id == event.id)
+                        .order_by(Fight.fight_order)
+                    )
+                    fights_list = fights.scalars().all()
+                    
+                    if len(fights_list) < 6:
+                        continue
+                    
+                    # Выбираем 5 случайных основных боев (первые 10 боев)
+                    main_fights = random.sample(fights_list[:10], 5)
+                    # Страховочный бой из оставшихся
+                    remaining_fights = [f for f in fights_list if f not in main_fights]
+                    insurance_fight = random.choice(remaining_fights) if remaining_fights else None
+                    
+                    # Основные ставки
+                    for fight in main_fights:
+                        chosen_fighter = 1 if random.random() > 0.5 else 2
+                        odds = fight.odds1 if chosen_fighter == 1 else fight.odds2
+                        
+                        bet = Bet(
+                            user_id=user.user_id,
+                            event_id=event.id,
+                            fight_id=fight.id,
+                            bet_type='main',
+                            chosen_fighter=chosen_fighter,
+                            odds_at_bet=odds,
+                            status='win' if str(chosen_fighter) == fight.winner else 'lose',
+                            points_earned=float(odds) if str(chosen_fighter) == fight.winner else 0.0
+                        )
+                        session.add(bet)
+                    
+                    # Страховочная ставка
+                    if insurance_fight:
+                        chosen_fighter = 1 if random.random() > 0.5 else 2
+                        odds = insurance_fight.odds1 if chosen_fighter == 1 else insurance_fight.odds2
+                        
+                        bet = Bet(
+                            user_id=user.user_id,
+                            event_id=event.id,
+                            fight_id=insurance_fight.id,
+                            bet_type='insurance',
+                            chosen_fighter=chosen_fighter,
+                            odds_at_bet=odds,
+                            status='win' if str(chosen_fighter) == insurance_fight.winner else 'lose',
+                            points_earned=float(odds) if str(chosen_fighter) == insurance_fight.winner else 0.0
+                        )
+                        session.add(bet)
+            
+            await session.commit()
+            
+            # Обновляем балансы пользователей
+            for user in all_users:
+                from sqlalchemy import func
+                bets_result = await session.execute(
+                    select(func.sum(Bet.points_earned))
+                    .where(Bet.user_id == user.user_id)
                 )
-                logger.info(f"Создан тестовый турнир ID: {event.id}")
-            else:
-                await message.answer("❌ Не удалось создать турнир")
+                total_points = bets_result.scalar_one_or_none() or 0.0
+                user.total_balance = float(total_points)
+            
+            await session.commit()
+            
+            # Статистика
+            events_count = len(test_events)
+            users_count = len(all_users)
+            
+            await message.answer(
+                f"✅ <b>Тестовые данные созданы!</b>\n\n"
+                f"• Турниров: {events_count}\n"
+                f"• Игроков: {users_count}\n"
+                f"• Годы: {previous_year} и {current_year}\n\n"
+                f"Теперь можно:\n"
+                f"1. Проверить архив\n"
+                f"2. Проверить общий рейтинг\n"
+                f"3. Создать новый турнир для теста",
+                parse_mode="HTML"
+            )
                 
     except Exception as e:
         logger.error(f"Ошибка создания тестового турнира: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
-
-@dp.message(Command("cleartest"))
-async def cmd_clear_test(message: Message):
-    """Удаление всех тестовых турниров (только админ)"""
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    
-    try:
-        from db_utils import async_session
-        from database import Event
-        from sqlalchemy import delete
-        
-        async with async_session() as session:
-            await session.execute(
-                delete(Event).where(Event.title.like('%Тестовый%'))
-            )
-            await session.commit()
-        
-        await message.answer("✅ Все тестовые турниры удалены")
-        
-    except Exception as e:
-        logger.error(f"Ошибка очистки: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 # ==================== ОБРАБОТЧИКИ INLINE-КНОПОК ====================
@@ -186,11 +357,11 @@ async def process_current(callback: CallbackQuery):
     try:
         await callback.answer()
         
-        from db_utils import get_open_event_with_fights, async_session, get_or_create_user
+        from db_utils import get_open_event_with_fights, get_session, get_or_create_user
         from database import Bet, Fight, User
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             # 1. Получаем открытый турнир
             event_data = await get_open_event_with_fights(session)
             
@@ -210,6 +381,9 @@ async def process_current(callback: CallbackQuery):
                 callback.from_user.username,
                 callback.from_user.full_name
             )
+
+            # ДОБАВЛЯЕМ СРАЗУ ПОСЛЕ СОЗДАНИЯ ПОЛЬЗОВАТЕЛЯ:
+            #await session.commit()
             
             # 3. Получаем ВСЕХ пользователей (наших игроков)
             users_result = await session.execute(
@@ -376,9 +550,9 @@ async def process_current(callback: CallbackQuery):
 async def update_fight_selection_message(message: Message, user_id: int, event_id: int):
     """Обновляет сообщение с выбором боев"""
     try:
-        from db_utils import async_session, get_fights_for_event, get_event_by_id
+        from db_utils import get_session, get_fights_for_event, get_event_by_id
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             fights = await get_fights_for_event(session, event_id)
             
@@ -454,9 +628,9 @@ async def process_my_bets_detail(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("📊 Загружаю детальные ставки...")
         
-        from db_utils import async_session, get_user_bets_for_event, get_fights_for_event, get_event_by_id
+        from db_utils import get_session, get_user_bets_for_event, get_fights_for_event, get_event_by_id
         
-        async with async_session() as session:
+        async with get_session() as session:
             bets = await get_user_bets_for_event(session, callback.from_user.id, event_id)
             fights = await get_fights_for_event(session, event_id)
             event = await get_event_by_id(session, event_id)
@@ -538,11 +712,11 @@ async def process_archive(callback: CallbackQuery):
     try:
         await callback.answer()
         
-        from db_utils import async_session, get_finished_events
+        from db_utils import get_session, get_finished_events
         from database import Event
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем завершенные турниры
             result = await session.execute(
                 select(Event)
@@ -584,11 +758,11 @@ async def process_view_archive(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("📊 Загружаю результаты турнира...")
         
-        from db_utils import async_session, get_event_by_id, get_fights_for_event, get_user_bets_for_event
+        from db_utils import get_session, get_event_by_id, get_fights_for_event, get_user_bets_for_event
         from database import User, Bet
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             fights = await get_fights_for_event(session, event_id)
             
@@ -818,12 +992,12 @@ async def process_rating(callback: CallbackQuery):
     try:
         await callback.answer()
         
-        from db_utils import async_session
+        from db_utils import get_session
         from database import User, Bet, Event
         from sqlalchemy import select, func
         from datetime import datetime
         
-        async with async_session() as session:
+        async with get_session() as session:
             current_year = datetime.now().year
             
             # Получаем пользователей с их общим балансом за текущий год
@@ -889,11 +1063,11 @@ async def process_admin_close_event(callback: CallbackQuery):
         
         await callback.answer("🏁 Выбор турнира для закрытия")
         
-        from db_utils import async_session, get_unfinished_events
+        from db_utils import get_session, get_unfinished_events
         from database import Event, Fight
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем незавершенные турниры
             unfinished_events = await get_unfinished_events(session)
             
@@ -1016,10 +1190,10 @@ async def process_admin_commands(callback: CallbackQuery):
         elif data == "admin_add_odds":
             await callback.answer("📥 Ввод/редактирование коэффициентов")
             
-            from db_utils import get_events_for_odds_edit, async_session, get_fights_for_event
+            from db_utils import get_events_for_odds_edit, get_session, get_fights_for_event
             from database import Event
             
-            async with async_session() as session:
+            async with get_session() as session:
                 events = await get_events_for_odds_edit(session)
                 
                 if not events:
@@ -1091,11 +1265,11 @@ async def process_admin_commands(callback: CallbackQuery):
             try:
                 await callback.answer()
                 
-                from db_utils import async_session
+                from db_utils import get_session
                 from database import User, Event
                 from sqlalchemy import select
                 
-                async with async_session() as session:
+                async with get_session() as session:
                     result = await session.execute(select(User))
                     users = result.scalars().all()
                     user_count = len(users)
@@ -1136,11 +1310,11 @@ async def process_admin_confirm_close(callback: CallbackQuery):
         
         event_id = int(callback.data.split(":")[1])
         
-        from db_utils import async_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
+        from db_utils import get_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
         from database import Event, Fight
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -1208,11 +1382,11 @@ async def process_admin_execute_close(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("🔄 Закрываю турнир и считаю очки...")
         
-        from db_utils import async_session, get_event_by_id, get_fights_for_event, mark_event_as_finished, calculate_user_points_for_event, update_event_results_from_api
+        from db_utils import get_session, get_event_by_id, get_fights_for_event, mark_event_as_finished, calculate_user_points_for_event, update_event_results_from_api
         from database import Fight, User
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -1287,9 +1461,9 @@ async def process_admin_update_single(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("🔄 Обновляю из API...")
         
-        from db_utils import async_session, get_event_by_id, update_event_results_from_api
+        from db_utils import get_session, get_event_by_id, update_event_results_from_api
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -1367,7 +1541,7 @@ async def process_create_draft(callback: CallbackQuery):
         logger.info(f"Создаю турнир: {event_data.get('name')} с {len(fights_data)} боями")
         
         # Создаем турнир
-        async with async_session() as session:
+        async with get_session() as session:
             event = await create_event_from_api(session, event_data, fights_data)
             
             if event:
@@ -1422,9 +1596,9 @@ async def process_input_odds(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         logger.info(f"Event ID: {event_id}")
         
-        from db_utils import get_fights_for_event, async_session
+        from db_utils import get_fights_for_event, get_session
         
-        async with async_session() as session:
+        async with get_session() as session:
             fights = await get_fights_for_event(session, event_id)
             logger.info(f"Получено боев: {len(fights)}")
             
@@ -1497,11 +1671,11 @@ async def process_input_odds(callback: CallbackQuery):
 
 @dp.message(Command("cleardb"))
 async def cmd_clear_db(message: Message):
-    """Полная очистка БД (только админ)"""
+    """Полная очистка ТЕСТОВОЙ БД (только админ)"""
     if message.from_user.id != config.ADMIN_ID:
         return
     
-    await message.answer("🗑️ Очищаю ВСЮ базу данных...")
+    await message.answer(f"🗑️ Очищаю ТЕСТОВУЮ базу данных ({config.DB_NAME})...")
     
     from database import engine, Base
     import asyncio
@@ -1512,7 +1686,7 @@ async def cmd_clear_db(message: Message):
             await conn.run_sync(Base.metadata.create_all)
     
     await clear_all()
-    await message.answer("✅ База данных полностью очищена и пересоздана")
+    await message.answer(f"✅ Тестовая база данных полностью очищена и пересоздана")
 
 @dp.callback_query(lambda c: c.data.startswith("make_bets:"))
 async def process_make_bets_start(callback: CallbackQuery):
@@ -1521,7 +1695,7 @@ async def process_make_bets_start(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer()
         
-        from db_utils import async_session, get_fights_for_event, get_event_by_id
+        from db_utils import get_session, get_fights_for_event, get_event_by_id
         from aiogram.fsm.context import FSMContext
         from aiogram.fsm.state import State, StatesGroup
         
@@ -1532,7 +1706,7 @@ async def process_make_bets_start(callback: CallbackQuery):
             choosing_insurance_fight = State()  # Выбор страховочного боя
             confirming_bets = State()  # Подтверждение
         
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем турнир и бои
             event = await get_event_by_id(session, event_id)
             fights = await get_fights_for_event(session, event_id)
@@ -1679,9 +1853,9 @@ async def process_reset_main(callback: CallbackQuery):
 async def show_insurance_selection(message: Message, user_id: int, event_id: int):
     """Показывает выбор страховочного боя с сохранением оригинальных номеров"""
     try:
-        from db_utils import async_session, get_event_by_id, get_fights_for_event
+        from db_utils import get_session, get_event_by_id, get_fights_for_event
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             all_fights = await get_fights_for_event(session, event_id)
             
@@ -1749,9 +1923,9 @@ async def show_insurance_selection(message: Message, user_id: int, event_id: int
 async def show_insurance_winner_selection(message: Message, user_id: int, event_id: int):
     """Выбор победителя в страховочном бою"""
     try:
-        from db_utils import async_session, get_event_by_id, get_fights_for_event
+        from db_utils import get_session, get_event_by_id, get_fights_for_event
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             all_fights = await get_fights_for_event(session, event_id)
             
@@ -1803,7 +1977,7 @@ async def show_insurance_winner_selection(message: Message, user_id: int, event_
 async def show_confirmation(message: Message, user_id: int, event_id: int):
     """Показывает подтверждение ставок перед сохранением"""
     try:
-        from db_utils import async_session, get_event_by_id, get_fights_for_event
+        from db_utils import get_session, get_event_by_id, get_fights_for_event
         
         if ('betting_data' not in temp_event_data or 
             user_id not in temp_event_data['betting_data']):
@@ -1815,7 +1989,7 @@ async def show_confirmation(message: Message, user_id: int, event_id: int):
         
         betting_data = temp_event_data['betting_data'][user_id]
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             all_fights = await get_fights_for_event(session, event_id)
             fights_dict = {f.id: f for f in all_fights}
@@ -1923,7 +2097,7 @@ async def process_save_bets(callback: CallbackQuery):
         
         await callback.answer("💾 Сохраняю ставки...")
         
-        from db_utils import async_session, save_user_bets
+        from db_utils import get_session, save_user_bets
         
         # Подготавливаем данные для сохранения
         bets_to_save = {
@@ -1950,7 +2124,7 @@ async def process_save_bets(callback: CallbackQuery):
         if insurance_fight_id and insurance_winner:
             # Находим бой
             from db_utils import get_fights_for_event
-            async with async_session() as session:
+            async with get_session() as session:
                 all_fights = await get_fights_for_event(session, event_id)
                 insurance_fight = next((f for f in all_fights if f.id == insurance_fight_id), None)
                 
@@ -1965,7 +2139,7 @@ async def process_save_bets(callback: CallbackQuery):
                     }
         
         # Сохраняем в БД
-        async with async_session() as session:
+        async with get_session() as session:
             success = await save_user_bets(
                 session, 
                 user_id, 
@@ -2074,9 +2248,9 @@ async def process_choose_insurance_winner(callback: CallbackQuery):
         betting_data['step'] = 'insurance_complete'
         
         # Получаем имя бойца для уведомления
-        from db_utils import async_session, get_fights_for_event
+        from db_utils import get_session, get_fights_for_event
         
-        async with async_session() as session:
+        async with get_session() as session:
             fights = await get_fights_for_event(session, event_id)
             fight = next((f for f in fights if f.id == fight_id), None)
             
@@ -2156,9 +2330,9 @@ async def process_choose_winner(callback: CallbackQuery):
         }
         
         # Находим коэффициент для выбранного бойца
-        from db_utils import async_session, get_fights_for_event
+        from db_utils import get_session, get_fights_for_event
         
-        async with async_session() as session:
+        async with get_session() as session:
             fights = await get_fights_for_event(session, event_id)
             fight = next((f for f in fights if f.id == fight_id), None)
             
@@ -2182,9 +2356,9 @@ async def process_choose_winner(callback: CallbackQuery):
 async def show_fight_winner_selection(message: Message, user_id: int, event_id: int, fight_index: int):
     """Показывает выбор победителя для конкретного боя"""
     try:
-        from db_utils import async_session, get_event_by_id
+        from db_utils import get_session, get_event_by_id
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             betting_data = temp_event_data['betting_data'][user_id]
             
@@ -2251,9 +2425,9 @@ async def process_confirm_main(callback: CallbackQuery):
         
         await callback.answer("Загружаю бои...")
         
-        from db_utils import async_session, get_fights_for_event, get_event_by_id
+        from db_utils import get_session, get_fights_for_event, get_event_by_id
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             all_fights = await get_fights_for_event(session, event_id)
             
@@ -2290,9 +2464,9 @@ async def cmd_update_results(message: Message):
     await message.answer("🔄 Проверяю незавершенные турниры...")
     
     try:
-        from db_utils import async_session, update_event_results_from_api, get_unfinished_events
+        from db_utils import get_session, update_event_results_from_api, get_unfinished_events
         
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем незавершенные турниры
             unfinished_events = await get_unfinished_events(session)
             
@@ -2340,11 +2514,11 @@ async def process_admin_close_event(callback: CallbackQuery):
         
         await callback.answer("🏁 Выбор турнира для закрытия")
         
-        from db_utils import async_session, get_unfinished_events
+        from db_utils import get_session, get_unfinished_events
         from database import Event, Fight
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем незавершенные турниры
             unfinished_events = await get_unfinished_events(session)
             
@@ -2407,11 +2581,11 @@ async def process_admin_confirm_close(callback: CallbackQuery):
         
         event_id = int(callback.data.split(":")[1])
         
-        from db_utils import async_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
+        from db_utils import get_session, get_event_by_id, get_fights_for_event, update_event_results_from_api
         from database import Event, Fight
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -2479,9 +2653,9 @@ async def process_admin_update_single(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("🔄 Обновляю из API...")
         
-        from db_utils import async_session, get_event_by_id, update_event_results_from_api
+        from db_utils import get_session, get_event_by_id, update_event_results_from_api
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -2533,11 +2707,11 @@ async def process_admin_calculate_points(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("🧮 Считаю очки...")
         
-        from db_utils import async_session, get_event_by_id, calculate_user_points_for_event
+        from db_utils import get_session, get_event_by_id, calculate_user_points_for_event
         from database import User, Bet
         from sqlalchemy import select
         
-        async with async_session() as session:
+        async with get_session() as session:
             event = await get_event_by_id(session, event_id)
             if not event:
                 await callback.answer("❌ Турнир не найден", show_alert=True)
@@ -2655,7 +2829,7 @@ async def handle_all_messages(message: Message):
                 return
             
             # Получаем список боев из БД чтобы знать их ID
-            async with async_session() as session:
+            async with get_session() as session:
                 fights = await get_fights_for_event(session, event_id)
                 
                 if len(fights) != expected_count:

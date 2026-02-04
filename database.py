@@ -11,10 +11,10 @@ engine = create_async_engine(
     echo=False,  # Поставьте True, чтобы видеть SQL-запросы в консоли (для отладки)
 )
 
-# Фабрика сессий
+'''# Фабрика сессий
 async_session = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
-)
+)'''
 
 # Базовый класс для моделей
 Base = declarative_base()

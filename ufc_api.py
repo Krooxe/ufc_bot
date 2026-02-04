@@ -204,7 +204,7 @@ def get_test_ppv_event() -> Dict:
     event_date = datetime.now(timezone.utc) + timedelta(days=7)
     
     return {
-        'id': 305,
+        'id': None,
         'name': 'UFC 305: Тестовый турнир',
         'shortName': 'UFC 305',
         'date': event_date.isoformat().replace('+00:00', 'Z'),
