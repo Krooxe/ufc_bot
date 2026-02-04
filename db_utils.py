@@ -149,13 +149,14 @@ async def get_or_create_user(
     username: str = None,
     full_name: str = None
 ) -> User:
-    """Получает или создает пользователя"""
+    """Получает или создает пользователя, обновляет данные если изменились"""
     result = await session.execute(
         select(User).where(User.user_id == user_id)
     )
     user = result.scalar_one_or_none()
     
     if not user:
+        # Создаем нового пользователя
         user = User(
             user_id=user_id,
             username=username,
@@ -164,6 +165,19 @@ async def get_or_create_user(
         session.add(user)
         await session.commit()
         logger.info(f"Создан новый пользователь: {user_id}")
+    else:
+        # ОБНОВЛЯЕМ данные пользователя, если они изменились
+        updated = False
+        if username and user.username != username:
+            user.username = username
+            updated = True
+        if full_name and user.full_name != full_name:
+            user.full_name = full_name
+            updated = True
+        
+        if updated:
+            await session.commit()
+            logger.info(f"Обновлены данные пользователя: {user_id}")
     
     return user
 
@@ -373,20 +387,15 @@ async def save_user_bets(
     session: AsyncSession,
     user_id: int,
     event_id: int,
-    bets_data: dict
+    bets_data: dict,
+    username: str = None,  # ДОБАВИТЬ
+    full_name: str = None  # ДОБАВИТЬ
 ) -> bool:
-    """
-    Сохраняет ставки пользователя в БД
     
-    bets_data = {
-        'main_bets': [{'fight_id': 1, 'chosen_fighter': 1, 'odds': 1.5}, ...],  # 5 ставок
-        'insurance_bet': {'fight_id': 6, 'chosen_fighter': 2, 'odds': 2.1} или None
-    }
-    """
     try:
         # Проверяем, что пользователь существует
         user = await get_or_create_user(
-            session, user_id, None, None
+            session, user_id, username, full_name
         )
         
         # Удаляем старые ставки пользователя на этот турнир (если есть)

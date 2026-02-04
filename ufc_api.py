@@ -197,14 +197,14 @@ async def test_espn_api():
 # ==================== ТЕСТОВЫЕ ДАННЫЕ (для режима разработки) ====================
 
 def get_test_ppv_event() -> Dict:
-    """Возвращает тестовый PPV турнир для разработки"""
+    """Возвращает тестовый PPV турнир для разработки - 15 боев"""
     from datetime import datetime, timedelta, timezone
     
     # Турнир через 7 дней от текущей даты
     event_date = datetime.now(timezone.utc) + timedelta(days=7)
     
     return {
-        'id': 123456,  # ИЗМЕНИТЬ: был 'test-123', теперь число!
+        'id': 305,
         'name': 'UFC 305: Тестовый турнир',
         'shortName': 'UFC 305',
         'date': event_date.isoformat().replace('+00:00', 'Z'),
@@ -215,20 +215,20 @@ def get_test_ppv_event() -> Dict:
                     {
                         'athlete': {
                             'id': f'fighter_{i}_1',
-                            'displayName': f'Тестовый Боец {i}A',
+                            'displayName': f'Боец {i}A',
                             'shortName': f'Fighter{i}A'
                         }
                     },
                     {
                         'athlete': {
                             'id': f'fighter_{i}_2',
-                            'displayName': f'Тестовый Боец {i}B',
+                            'displayName': f'Боец {i}B',
                             'shortName': f'Fighter{i}B'
                         }
                     }
                 ]
             }
-            for i in range(1, 7)  # 6 тестовых боев
+            for i in range(1, 16)  # 15 тестовых боев
         ]
     }
 
@@ -345,14 +345,23 @@ def parse_event_results(event_data: Dict) -> List[Dict]:
     return fights
 
 def get_test_results() -> List[Dict]:
-    """Тестовые результаты для отладки"""
+    """Тестовые результаты для отладки - 15 боев с разными исходами"""
     return [
-        {'fight_order': 1, 'fighter1_name': 'Тестовый Боец 1A', 'fighter2_name': 'Тестовый Боец 1B', 'winner': '1', 'method': 'KO'},
-        {'fight_order': 2, 'fighter1_name': 'Тестовый Боец 2A', 'fighter2_name': 'Тестовый Боец 2B', 'winner': '2', 'method': 'Submission'},
-        {'fight_order': 3, 'fighter1_name': 'Тестовый Боец 3A', 'fighter2_name': 'Тестовый Боец 3B', 'winner': '1', 'method': 'Decision'},
-        {'fight_order': 4, 'fighter1_name': 'Тестовый Боец 4A', 'fighter2_name': 'Тестовый Боец 4B', 'winner': 'nc', 'method': 'No Contest'},
-        {'fight_order': 5, 'fighter1_name': 'Тестовый Боец 5A', 'fighter2_name': 'Тестовый Боец 5B', 'winner': 'draw', 'method': 'Draw'},
-        {'fight_order': 6, 'fighter1_name': 'Тестовый Боец 6A', 'fighter2_name': 'Тестовый Боец 6B', 'winner': '1', 'method': 'TKO'},
+        {'fight_order': 1, 'fighter1_name': 'Боец 1A', 'fighter2_name': 'Боец 1B', 'winner': '1', 'method': 'KO'},
+        {'fight_order': 2, 'fighter1_name': 'Боец 2A', 'fighter2_name': 'Боец 2B', 'winner': '2', 'method': 'Submission'},
+        {'fight_order': 3, 'fighter1_name': 'Боец 3A', 'fighter2_name': 'Боец 3B', 'winner': '1', 'method': 'Decision'},
+        {'fight_order': 4, 'fighter1_name': 'Боец 4A', 'fighter2_name': 'Боец 4B', 'winner': '2', 'method': 'TKO'},
+        {'fight_order': 5, 'fighter1_name': 'Боец 5A', 'fighter2_name': 'Боец 5B', 'winner': '1', 'method': 'KO'},
+        {'fight_order': 6, 'fighter1_name': 'Боец 6A', 'fighter2_name': 'Боец 6B', 'winner': '2', 'method': 'Decision'},
+        {'fight_order': 7, 'fighter1_name': 'Боец 7A', 'fighter2_name': 'Боец 7B', 'winner': '1', 'method': 'Submission'},
+        {'fight_order': 8, 'fighter1_name': 'Боец 8A', 'fighter2_name': 'Боец 8B', 'winner': 'draw', 'method': 'Draw'},  # НИЧЬЯ
+        {'fight_order': 9, 'fighter1_name': 'Боец 9A', 'fighter2_name': 'Боец 9B', 'winner': 'nc', 'method': 'No Contest'},  # НЕ СОСТОЯЛСЯ
+        {'fight_order': 10, 'fighter1_name': 'Боец 10A', 'fighter2_name': 'Боец 10B', 'winner': 'cancelled', 'method': 'Canceled'},  # ОТМЕНЕН
+        {'fight_order': 11, 'fighter1_name': 'Боец 11A', 'fighter2_name': 'Боец 11B', 'winner': '1', 'method': 'Decision'},
+        {'fight_order': 12, 'fighter1_name': 'Боец 12A', 'fighter2_name': 'Боец 12B', 'winner': '2', 'method': 'TKO'},
+        {'fight_order': 13, 'fighter1_name': 'Боец 13A', 'fighter2_name': 'Боец 13B', 'winner': '1', 'method': 'KO'},
+        {'fight_order': 14, 'fighter1_name': 'Боец 14A', 'fighter2_name': 'Боец 14B', 'winner': '2', 'method': 'Submission'},
+        {'fight_order': 15, 'fighter1_name': 'Боец 15A', 'fighter2_name': 'Боец 15B', 'winner': '1', 'method': 'Decision'}
     ]
 
 if __name__ == "__main__":

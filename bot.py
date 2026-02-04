@@ -801,10 +801,6 @@ async def process_view_archive(callback: CallbackQuery):
                 [InlineKeyboardButton(text="⬅️ Назад в архив", callback_data="menu_archive")]
             ]
             
-            # Если пользователь админ, показываем дополнительные кнопки
-            if callback.from_user.id == config.ADMIN_ID:
-                buttons.insert(0, [InlineKeyboardButton(text="⚙️ Админ: Пересчитать всё", callback_data=f"admin_recalculate:{event_id}")])
-            
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -1832,13 +1828,12 @@ async def show_confirmation(message: Message, user_id: int, event_id: int):
             total_odds = 1.0
             main_bets_count = 0
             
-            # Основные ставки - СОРТИРУЕМ ПО fight_order
+            # Основные ставки - УЖЕ ОТСОРТИРОВАНЫ по fight_order
             selected_fights = betting_data.get('selected_fights_ordered', [])
             selected_winners = betting_data.get('selected_winners', {})
             
-            # Создаем список ставок с информацией о боях
-            main_bets_list = []
-            for fight in selected_fights:
+            # Просто выводим в том порядке, в котором они есть (уже отсортированы)
+            for i, fight in enumerate(selected_fights, 1):
                 fight_id = fight.id
                 if fight_id in selected_winners:
                     winner_info = selected_winners[fight_id]
@@ -1848,23 +1843,13 @@ async def show_confirmation(message: Message, user_id: int, event_id: int):
                                    else fight.fighter2_name)
                     odds = fight.odds1 if chosen_fighter == 1 else fight.odds2
                     
-                    main_bets_list.append({
-                        'fight_order': fight.fight_order,
-                        'fight_id': fight_id,
-                        'fighter_name': fighter_name,
-                        'odds': odds
-                    })
+                    text += f"{i}. Бой {fight.fight_order}: <b>{fighter_name}</b> (коэф: <b>{odds:.2f}</b>)\n"
+                    
+                    if odds:
+                        total_odds *= float(odds)
+                    main_bets_count += 1
             
-            # СОРТИРУЕМ по fight_order
-            main_bets_list.sort(key=lambda x: x['fight_order'])
-            
-            # Выводим отсортированные ставки
-            for i, bet_info in enumerate(main_bets_list, 1):
-                text += f"{i}. Бой {bet_info['fight_order']}: <b>{bet_info['fighter_name']}</b> (коэф: <b>{bet_info['odds']:.2f}</b>)\n"
-                
-                if bet_info['odds']:
-                    total_odds *= float(bet_info['odds'])
-                main_bets_count += 1
+            # Остальной код без изменений...
             
             # Страховочная ставка
             insurance_fight_id = betting_data.get('insurance_fight_id')
@@ -1985,7 +1970,9 @@ async def process_save_bets(callback: CallbackQuery):
                 session, 
                 user_id, 
                 event_id, 
-                bets_to_save
+                bets_to_save,
+                username=callback.from_user.username,  # ДОБАВИТЬ
+                full_name=callback.from_user.full_name  # ДОБАВИТЬ
             )
             
             if success:
@@ -2273,13 +2260,16 @@ async def process_confirm_main(callback: CallbackQuery):
             # Создаём словарь боев для быстрого поиска
             fights_dict = {fight.id: fight for fight in all_fights}
             
-            # Получаем выбранные бои в правильном порядке
+            # Получаем выбранные бои
             selected_fights = []
             for fight_id in betting_data['selected_main_fights']:
                 if fight_id in fights_dict:
                     selected_fights.append(fights_dict[fight_id])
             
-            # Сохраняем выбранные бои в правильном порядке
+            # ВАЖНО: СОРТИРУЕМ по fight_order (исправление!)
+            selected_fights.sort(key=lambda f: f.fight_order)
+            
+            # Сохраняем ОТСОРТИРОВАННЫЕ бои
             betting_data['selected_fights_ordered'] = selected_fights
             betting_data['current_fight_index'] = 0  # Начинаем с первого боя
             betting_data['step'] = 'choosing_winners'
