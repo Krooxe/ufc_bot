@@ -131,21 +131,18 @@ def get_next_ppv_event(events: List[Dict]) -> Optional[Dict]:
 def get_event_fights_from_espn(event: Dict) -> List[Dict]:
     """
     Извлекает бои из события ESPN API
-    ВАЖНО: возвращает бои в ОБРАТНОМ порядке (главный бой последний)
     """
     fights = []
     
     # В ESPN бои находятся в competitions
     competitions = event.get('competitions', [])
     
-    # Собираем все бои
     for comp in competitions:
         competitors = comp.get('competitors', [])
         if len(competitors) >= 2:
             # Получаем имена бойцов
             fighter1 = competitors[0].get('athlete', {}).get('displayName', 'N/A')
             fighter2 = competitors[1].get('athlete', {}).get('displayName', 'N/A')
-            
             # Получаем дополнительные данные
             fighter1_id = competitors[0].get('athlete', {}).get('id')
             fighter2_id = competitors[1].get('athlete', {}).get('id')
@@ -154,14 +151,14 @@ def get_event_fights_from_espn(event: Dict) -> List[Dict]:
                 'fighter1': {'name': fighter1, 'id': fighter1_id},
                 'fighter2': {'name': fighter2, 'id': fighter2_id},
                 'competition_id': comp.get('id'),
-                'status': 'scheduled'
+                'status': 'scheduled'  # ESPN не дает статус confirmed
             })
     
     # ВАЖНО: возвращаем в ОБРАТНОМ порядке (главный бой последний)
     fights_reversed = list(reversed(fights))
     
-    logger.info(f"Извлечено боев из ESPN: {len(fights)} (отображено в обратном порядке)")
-    return fights_reversed  # Возвращаем в обратном порядке!
+    logger.info(f"Извлечено боев из ESPN: {len(fights)}")
+    return fights
 
 # ==================== ТЕСТОВЫЙ ЗАПУСК ====================
 
