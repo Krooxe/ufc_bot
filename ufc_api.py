@@ -94,19 +94,33 @@ def get_next_ppv_event(events: List[Dict]) -> Optional[Dict]:
                 future_events.append(event)
     
     # Фильтруем PPV события
-    ppv_events = [event for event in future_events if is_ppv_event(event)]
+    # # ppv_events = [event for event in future_events if is_ppv_event(event)]
     
-    if not ppv_events:
-        logger.info("PPV события не найдены. Доступные события:")
-        for event in future_events[:3]:
-            logger.info(f"  - {event.get('name', 'N/A')}")
-        return None
+    # if not ppv_events:
+    #     logger.info("PPV события не найдены. Доступные события:")
+    #     for event in future_events[:3]:
+    #         logger.info(f"  - {event.get('name', 'N/A')}")
+    #     return None
     
+    # # Сортируем по дате (ближайшие первыми)
+    # ppv_events.sort(key=lambda x: parse_espn_date(x.get('date', '')))
+    
+    # # Берем самое ближайшее
+    # next_event = ppv_events[0]
+
+    #=========================================
+    # Временный код: берем ВСЕ будущие турниры
+    if not future_events:
+        logger.info("Будущих событий не найдено.")
+        # Возвращаем последнее событие (может быть прошедшим)
+        events.sort(key=lambda x: parse_espn_date(x.get('date', '')), reverse=True)
+        return events[0] if events else None
+    
+    
+    next_event = future_events[0]
+    #=========================================
     # Сортируем по дате (ближайшие первыми)
-    ppv_events.sort(key=lambda x: parse_espn_date(x.get('date', '')))
-    
-    # Берем самое ближайшее
-    next_event = ppv_events[0]
+    future_events.sort(key=lambda x: parse_espn_date(x.get('date', '')))
     
     logger.info(f"Найден PPV: {next_event.get('name')}")
     logger.info(f"Дата: {next_event.get('date')}")
@@ -117,12 +131,14 @@ def get_next_ppv_event(events: List[Dict]) -> Optional[Dict]:
 def get_event_fights_from_espn(event: Dict) -> List[Dict]:
     """
     Извлекает бои из события ESPN API
+    ВАЖНО: возвращает бои в ОБРАТНОМ порядке (главный бой последний)
     """
     fights = []
     
     # В ESPN бои находятся в competitions
     competitions = event.get('competitions', [])
     
+    # Собираем все бои
     for comp in competitions:
         competitors = comp.get('competitors', [])
         if len(competitors) >= 2:
@@ -138,11 +154,14 @@ def get_event_fights_from_espn(event: Dict) -> List[Dict]:
                 'fighter1': {'name': fighter1, 'id': fighter1_id},
                 'fighter2': {'name': fighter2, 'id': fighter2_id},
                 'competition_id': comp.get('id'),
-                'status': 'scheduled'  # ESPN не дает статус confirmed
+                'status': 'scheduled'
             })
     
-    logger.info(f"Извлечено боев из ESPN: {len(fights)}")
-    return fights
+    # ВАЖНО: возвращаем в ОБРАТНОМ порядке (главный бой последний)
+    fights_reversed = list(reversed(fights))
+    
+    logger.info(f"Извлечено боев из ESPN: {len(fights)} (отображено в обратном порядке)")
+    return fights_reversed  # Возвращаем в обратном порядке!
 
 # ==================== ТЕСТОВЫЙ ЗАПУСК ====================
 
