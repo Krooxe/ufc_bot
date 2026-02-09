@@ -470,90 +470,118 @@ async def get_events_for_odds_edit(session: AsyncSession) -> List[Event]:
 
 async def update_event_results_from_api(session: AsyncSession, event: Event) -> bool:
     """
-    Обновляет результаты турнира из API
+    Обновляет результаты из UFC Stats - ВЕСЬ кард
     """
     try:
-        # ДЛЯ ТЕСТОВОГО РЕЖИМА: если DEBUG_MODE = True, всегда обновляем
-        if config.DEBUG_MODE:
-            logger.info(f"DEBUG_MODE: обновляем результаты для турнира {event.id}")
-            from ufc_api import get_test_results
+        print(f"🔄 Ищу результаты для турнира: {event.title}")
+        print(f"📅 Дата турнира: {event.date_utc.strftime('%d.%m.%Y')}")
+        
+        from ufc_stats_api import get_todays_ufc_event_results
+        
+        # Получаем ВСЕ бои подходящего турнира
+        ufc_fights = get_todays_ufc_event_results()
+        
+        if not ufc_fights:
+            print("❌ Не найден подходящий турнир на UFC Stats")
+            return False
+        
+        print(f"📊 На UFC Stats найдено {len(ufc_fights)} боев")
+        
+        # Получаем ВСЕ бои из нашей базы
+        db_fights = await get_fights_for_event(session, event.id)
+        print(f"📊 В нашей базе: {len(db_fights)} боев")
+        
+        if len(db_fights) != len(ufc_fights):
+            print(f"⚠️ Внимание! Разное количество боев: база={len(db_fights)}, UFC Stats={len(ufc_fights)}")
+        
+        updated = 0
+        matched_fights = []
+        
+        # Сопоставляем ВСЕ бои по именам
+        for db_fight in db_fights:
+            found_match = False
             
-            results = get_test_results()
-            
-            # Получаем существующие бои турнира
-            fights = await get_fights_for_event(session, event.id)
-            fights_dict = {f.fight_order: f for f in fights}
-            
-            # Обновляем результаты
-            updated_count = 0
-            for result in results:
-                fight_order = result.get('fight_order')
-                if not fight_order:
-                    continue
+            for ufc_fight in ufc_fights:
+                # Приводим имена к нижнему регистру для сравнения
+                db_f1 = db_fight.fighter1_name.lower()
+                db_f2 = db_fight.fighter2_name.lower()
+                ufc_f1 = ufc_fight['fighter1'].lower()
+                ufc_f2 = ufc_fight['fighter2'].lower()
+                
+                # Проверяем оба варианта порядка бойцов
+                if (db_f1 == ufc_f1 and db_f2 == ufc_f2) or (db_f1 == ufc_f2 and db_f2 == ufc_f1):
+                    # Нашли совпадение
+                    found_match = True
+                    winner_name = ufc_fight['winner'].lower()
                     
-                # Находим соответствующий бой
-                fight = fights_dict.get(fight_order)
-                if fight and fight.winner is None:  # Обновляем только если еще нет результата
-                    # Обновляем результат
-                    fight.winner = result.get('winner')
-                    updated_count += 1
+                    # Определяем победителя в нашем формате
+                    if winner_name == ufc_f1:
+                        db_fight.winner = '1' if db_f1 == ufc_f1 else '2'
+                    elif winner_name == ufc_f2:
+                        db_fight.winner = '2' if db_f1 == ufc_f1 else '1'
+                    elif winner_name == 'draw':
+                        db_fight.winner = 'draw'
+                    elif winner_name == 'nc':
+                        db_fight.winner = 'nc'
+                    else:
+                        print(f"⚠️ Неизвестный результат: {winner_name}")
+                        continue
+                    
+                    updated += 1
+                    matched_fights.append(ufc_fight['fight_order'])
+                    
+                    print(f"✅ Бой {db_fight.fight_order}: {db_fight.fighter1_name} vs {db_fight.fighter2_name} → {db_fight.winner}")
+                    break
             
-            # Помечаем турнир как завершенный если все бои имеют результаты
-            if updated_count > 0:
-                await mark_event_as_finished(session, event.id)
-                await session.commit()
-                logger.info(f"DEBUG_MODE: обновлены результаты для {updated_count} боев турнира {event.id}")
-                return True
-            else:
-                logger.warning(f"DEBUG_MODE: не найдено боев для обновления в турнире {event.id}")
-                return False
+            if not found_match:
+                print(f"⚠️ Не найден в UFC Stats: {db_fight.fighter1_name} vs {db_fight.fighter2_name}")
         
-        # РЕАЛЬНЫЙ API (если DEBUG_MODE = False)
-        if not event.ufc_api_id:
-            logger.warning(f"У турнира {event.id} нет API ID, нельзя обновить результаты")
-            return False
+        if updated > 0:
+            await session.commit()
+            print(f"🎉 ОБНОВЛЕНО {updated} БОЕВ ИЗ {len(db_fights)}")
+            print(f"📈 Сопоставлены бои с номерами: {sorted(matched_fights)}")
+            return True
         
-        # Получаем результаты из API
-        from ufc_api import fetch_event_results
-        results = await fetch_event_results(str(event.ufc_api_id))
+        print("❌ Не удалось сопоставить ни одного боя")
+        print("Проверьте:")
+        print("1. Имена бойцов в базе и на UFC Stats")
+        print("2. Что это тот же самый турнир")
         
-        if not results:
-            logger.warning(f"Не удалось получить результаты для турнира {event.id}")
-            return False
+        return False
         
-        # Получаем существующие бои турнира
-        fights = await get_fights_for_event(session, event.id)
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+async def update_fights_with_results(session: AsyncSession, event_id: int, results: List[Dict]) -> bool:
+    """
+    Обновляет бои результатами
+    """
+    try:
+        fights = await get_fights_for_event(session, event_id)
         fights_dict = {f.fight_order: f for f in fights}
         
-        # Обновляем результаты
         updated_count = 0
         for result in results:
             fight_order = result.get('fight_order')
-            if not fight_order:
-                continue
-                
-            # Находим соответствующий бой
-            fight = fights_dict.get(fight_order)
-            if fight and fight.winner is None:  # Обновляем только если еще нет результата
-                # Обновляем результат
-                fight.winner = result.get('winner')
-                fight.odds1 = result.get('odds1', fight.odds1)  # Сохраняем старые коэфы если новых нет
-                fight.odds2 = result.get('odds2', fight.odds2)
-                updated_count += 1
+            if fight_order in fights_dict:
+                fight = fights_dict[fight_order]
+                if fight.winner is None:  # Обновляем только если нет результата
+                    fight.winner = result.get('winner')
+                    updated_count += 1
         
-        # Помечаем турнир как завершенный если все бои имеют результаты
         if updated_count > 0:
-            await mark_event_as_finished(session, event.id)
             await session.commit()
-            logger.info(f"Обновлены результаты для {updated_count} боев турнира {event.id}")
+            logger.info(f"Обновлены результаты для {updated_count} боев турнира {event_id}")
             return True
-        else:
-            logger.warning(f"Не найдено боев для обновления в турнире {event.id}")
-            return False
-            
+        
+        return False
+        
     except Exception as e:
         await session.rollback()
-        logger.error(f"Ошибка обновления результатов: {e}", exc_info=True)
+        logger.error(f"Ошибка обновления боев: {e}")
         return False
 
 async def get_finished_events(session: AsyncSession) -> List[Event]:
