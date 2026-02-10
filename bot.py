@@ -1137,22 +1137,22 @@ async def process_admin_commands(callback: CallbackQuery):
         data = callback.data
         
         if data == "admin_new_ppv":
-            await callback.answer("🔄 Получаю данные...")
-            from ufc_api import fetch_upcoming_events_with_fallback, get_next_ppv_event, get_event_fights_from_espn, parse_espn_date
+            await callback.answer("🔄 Получаю данные с ufcstats.com...")
+            from ufc_api import get_upcoming_event, get_event_fights
+            from datetime import datetime, timezone
             
-            events = await fetch_upcoming_events_with_fallback()
-            if not events:
-                await callback.message.edit_text("❌ Не удалось получить данные.", reply_markup=get_admin_menu())
-                return
-            
-            next_ppv = get_next_ppv_event(events)
+            # Получаем второй турнир с ufcstats.com
+            next_ppv = await get_upcoming_event()
             if not next_ppv:
-                await callback.message.edit_text("❌ Не найден PPV турнир.", reply_markup=get_admin_menu())
+                await callback.message.edit_text("❌ Не удалось получить турнир с ufcstats.com.", reply_markup=get_admin_menu())
                 return
             
-            event_date = parse_espn_date(next_ppv.get('date', ''))
+            # Парсим дату локально
+            date_iso = next_ppv.get('date', '').replace('Z', '+00:00')
+            event_date = datetime.fromisoformat(date_iso)
             date_str = event_date.strftime("%d.%m.%Y %H:%M UTC")
-            fights = get_event_fights_from_espn(next_ppv)
+            
+            fights = get_event_fights(next_ppv)
             
             if not fights:
                 await callback.message.edit_text("❌ Нет данных о боях.", reply_markup=get_admin_menu())

@@ -1,222 +1,289 @@
+"""
+ufc_api.py - Получение данных о UFC событиях из ufcstats.com
+ЧИСТЫЙ код, без косяков
+"""
+
 import aiohttp
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import re
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
+from bs4 import BeautifulSoup
 import config
 
 logger = logging.getLogger(__name__)
 
-# Новый URL ESPN API
-ESPN_API_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
+UFCSTATS_COMPLETED_URL = "http://ufcstats.com/statistics/events/completed"
 
-async def fetch_upcoming_events() -> Optional[List[Dict]]:
+
+async def get_upcoming_event() -> Optional[Dict]:
     """
-    Получает список предстоящих событий UFC из ESPN API
+    Основная функция: получает турнир для создания PPV
+    Берет ПЕРВЫЙ турнир (самый свежий) с ufcstats.com
     """
+    if config.DEBUG_MODE:
+        return _get_test_ppv_event()
+    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(ESPN_API_URL, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    events = data.get('events', [])
-                    logger.info(f"Получено событий от ESPN: {len(events)}")
-                    return events
-                else:
-                    logger.error(f"Ошибка ESPN API: статус {response.status}")
+            # 1. Получаем список турниров
+            async with session.get(UFCSTATS_COMPLETED_URL, timeout=10) as response:
+                if response.status != 200:
+                    logger.error(f"Ошибка ufcstats.com: статус {response.status}")
                     return None
+                
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Находим все ссылки на события
+                event_links = soup.find_all("a", href=re.compile("event-details"))
+                if not event_links:
+                    logger.error("Не найдено турниров")
+                    return None
+                
+                # Берем ПЕРВУЮ ссылку (индекс 0)
+                link = event_links[0]
+                event_url = link["href"]
+                event_title = link.text.strip()
+                
+                # Парсим дату
+                parent_td = link.find_parent('td')
+                event_date = datetime.now(timezone.utc)
+                
+                if parent_td:
+                    date_match = re.search(
+                        r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', 
+                        parent_td.text
+                    )
+                    if date_match:
+                        event_date = datetime.strptime(date_match.group(), "%B %d, %Y").replace(
+                            tzinfo=timezone.utc, hour=18
+                        )
+                
+                logger.info(f"Найден турнир: {event_title}")
+            
+            # 2. Получаем бои этого турнира
+            fights = await _get_fights_from_event(session, event_url)
+            
+            # Формируем ответ
+            return {
+                'id': None,
+                'name': event_title,
+                'shortName': event_title[:30],
+                'date': event_date.isoformat().replace('+00:00', 'Z'),
+                'url': event_url,
+                'fights': fights,
+            }
+            
     except Exception as e:
-        logger.error(f"Ошибка при запросе к ESPN API: {e}")
+        logger.error(f"Ошибка получения турнира: {e}")
         return None
 
-def parse_espn_date(date_string: str) -> datetime:
+
+async def _get_fights_from_event(session: aiohttp.ClientSession, event_url: str) -> List[Dict]:
     """
-    Парсит дату из формата ESPN API с учетом часового пояса
-    Пример: "2024-05-04T23:00Z"
+    Получает все бои из события ufcstats.com (парсит напрямую со страницы турнира)
     """
     try:
-        # ESPN использует ISO формат с Z (UTC)
-        dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-        return dt
+        async with session.get(event_url, timeout=10) as response:
+            if response.status != 200:
+                logger.error(f"Ошибка HTTP {response.status} для {event_url}")
+                return []
+            
+            html = await response.text()
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # ДЛЯ ОТЛАДКИ: сохраним HTML чтобы посмотреть структуру
+            with open("debug_event_page.html", "w", encoding="utf-8") as f:
+                f.write(html[:5000])  # Первые 5000 символов
+            
+            # Ищем ВСЕХ бойцов на странице турнира
+            # На странице турнира бойцы в таблице или списке
+            
+            # Попробуем разные способы:
+            
+            # Способ 1: Ищем таблицу с боями по ID или классу
+            fights_table = soup.find("table", {"class": "b-fight-details__table"})
+            if not fights_table:
+                # Ищем по другим классам
+                fights_table = soup.find("table", {"class": "b-statistics__table"})
+            
+            # Способ 2: Ищем все строки с боями
+            fight_rows = []
+            if fights_table:
+                fight_rows = fights_table.find_all("tr")[1:]  # Пропускаем заголовок
+            else:
+                # Ищем все строки таблиц вообще
+                all_tables = soup.find_all("table")
+                for table in all_tables:
+                    rows = table.find_all("tr")
+                    if len(rows) > 5:  # Если таблица имеет несколько строк
+                        fight_rows = rows[1:]  # Пропускаем заголовок
+                        break
+            
+            logger.info(f"Найдено строк с боями: {len(fight_rows)}")
+            
+            if not fight_rows:
+                # Способ 3: Ищем бойцов по ссылкам с именами
+                fighter_links = soup.find_all("a", class_="b-link_style_black")
+                fighters = []
+                for link in fighter_links:
+                    name = link.text.strip()
+                    if name and name not in fighters:
+                        fighters.append(name)
+                
+                # Группируем по парам
+                fights = []
+                for i in range(0, len(fighters), 2):
+                    if i + 1 < len(fighters):
+                        fights.append({
+                            'order': len(fights) + 1,
+                            'fighter1': fighters[i],
+                            'fighter2': fighters[i + 1],
+                        })
+                
+                logger.info(f"Найдено боев через ссылки: {len(fights)}")
+                return fights
+            
+            # Парсим бои из строк таблицы
+            fights = []
+            for i, row in enumerate(fight_rows, 1):
+                try:
+                    # Ищем имена бойцов в строке
+                    fighter_cells = row.find_all("td")
+                    
+                    # Обычно имена во второй ячейке (индекс 1)
+                    if len(fighter_cells) >= 2:
+                        names_cell = fighter_cells[1]
+                        
+                        # Ищем имена бойцов в ячейке
+                        fighter_names = []
+                        
+                        # Ищем ссылки с именами
+                        name_links = names_cell.find_all("a", class_="b-link_style_black")
+                        if name_links and len(name_links) >= 2:
+                            fighter_names = [link.text.strip() for link in name_links[:2]]
+                        else:
+                            # Пробуем парсить текст ячейки
+                            cell_text = names_cell.get_text(strip=True)
+                            # Разделяем имена (обычно разделены двойным пробелом)
+                            if '  ' in cell_text:
+                                fighter_names = cell_text.split('  ')[:2]
+                            else:
+                                continue
+                        
+                        if len(fighter_names) >= 2:
+                            fights.append({
+                                'order': i,
+                                'fighter1': fighter_names[0],
+                                'fighter2': fighter_names[1],
+                            })
+                            logger.debug(f"Бой {i}: {fighter_names[0]} vs {fighter_names[1]}")
+                            
+                except Exception as e:
+                    logger.warning(f"Ошибка парсинга строки {i}: {e}")
+                    continue
+            
+            logger.info(f"Успешно спарсено {len(fights)} боев")
+            
+            # Если всё еще 0 боев, попробуем самый простой способ
+            if not fights:
+                # Ищем ВСЕ имена бойцов на странице
+                all_fighter_names = []
+                
+                # Ищем в разных местах
+                for tag in soup.find_all(['a', 'span', 'div', 'td']):
+                    text = tag.get_text(strip=True)
+                    # Фильтруем короткие тексты и не-имена
+                    if (len(text) > 3 and len(text) < 50 and 
+                        not text.isdigit() and 
+                        'UFC' not in text and 
+                        'Event' not in text and
+                        'Date' not in text and
+                        'Location' not in text):
+                        
+                        # Проверяем, похоже ли на имя бойца
+                        if any(word.istitle() for word in text.split()):
+                            if text not in all_fighter_names:
+                                all_fighter_names.append(text)
+                
+                # Группируем по парам (первые 20 имен)
+                valid_names = all_fighter_names[:20]
+                for i in range(0, len(valid_names), 2):
+                    if i + 1 < len(valid_names):
+                        fights.append({
+                            'order': len(fights) + 1,
+                            'fighter1': valid_names[i],
+                            'fighter2': valid_names[i + 1],
+                        })
+                
+                logger.info(f"Найдено боев через все имена: {len(fights)}")
+            
+            return fights
+            
     except Exception as e:
-        logger.error(f"Ошибка парсинга даты ESPN '{date_string}': {e}")
-        return datetime.now(timezone.utc)  # Возвращаем текущее время UTC
+        logger.error(f"Ошибка получения боев: {e}")
+        return []
 
-def is_ppv_event(event: Dict) -> bool:
-    """
-    Проверяет, является ли событие номерным PPV турниром в ESPN API
-    """
-    # Получаем название события
-    name = event.get('name', '').lower()
-    short_name = event.get('shortName', '').lower()
-    
-    # Проверяем по ключевым словам
-    check_name = name + " " + short_name
-    
-    # Исключаем не-PPV события
-    if any(exclude in check_name for exclude in ['fight night', 'fn', 'on espn', 'apex', 'ufc on']):
-        return False
-    
-    # Ищем паттерн "UFC" + пробел + цифры
-    pattern = r'ufc\s+\d+'
-    if re.search(pattern, check_name, re.IGNORECASE):
-        return True
-    
-    # Дополнительная проверка: если в названии есть номер и нет исключающих слов
-    if re.search(r'\d+', check_name) and 'ufc' in check_name:
-        return True
-    
-    return False
 
-from datetime import datetime, timezone  # ИМПОРТИРУЕМ timezone
-
-def get_next_ppv_event(events: List[Dict]) -> Optional[Dict]:
-    """
-    Находит следующий номерной PPV турнир из ESPN данных
-    """
-    if not events:
-        return None
-    
-    current_time = datetime.now(timezone.utc)  # Используем timezone-aware дату
-    
-    # Фильтруем только будущие события
-    future_events = []
-    for event in events:
-        date_str = event.get('date', '')
-        if date_str:
-            event_date = parse_espn_date(date_str)
-            # Делаем event_date тоже timezone-aware
-            if event_date.tzinfo is None:
-                event_date = event_date.replace(tzinfo=timezone.utc)
+async def _parse_fight_names(session: aiohttp.ClientSession, fight_url: str) -> tuple:
+    """Парсит имена бойцов с детальной страницы"""
+    try:
+        async with session.get(fight_url, timeout=10) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, 'html.parser')
             
-            if event_date > current_time:
-                future_events.append(event)
-    
-    # Фильтруем PPV события
-    # # ppv_events = [event for event in future_events if is_ppv_event(event)]
-    
-    # if not ppv_events:
-    #     logger.info("PPV события не найдены. Доступные события:")
-    #     for event in future_events[:3]:
-    #         logger.info(f"  - {event.get('name', 'N/A')}")
-    #     return None
-    
-    # # Сортируем по дате (ближайшие первыми)
-    # ppv_events.sort(key=lambda x: parse_espn_date(x.get('date', '')))
-    
-    # # Берем самое ближайшее
-    # next_event = ppv_events[0]
-
-    #=========================================
-    # Временный код: берем ВСЕ будущие турниры
-    if not future_events:
-        logger.info("Будущих событий не найдено.")
-        # Возвращаем последнее событие (может быть прошедшим)
-        events.sort(key=lambda x: parse_espn_date(x.get('date', '')), reverse=True)
-        return events[0] if events else None
-    
-    
-    next_event = future_events[0]
-    #=========================================
-    # Сортируем по дате (ближайшие первыми)
-    future_events.sort(key=lambda x: parse_espn_date(x.get('date', '')))
-    
-    logger.info(f"Найден PPV: {next_event.get('name')}")
-    logger.info(f"Дата: {next_event.get('date')}")
-    logger.info(f"ID: {next_event.get('id')}")
-    
-    return next_event
-
-def get_event_fights_from_espn(event: Dict) -> List[Dict]:
-    """
-    Извлекает бои из события ESPN API
-    """
-    fights = []
-    
-    # В ESPN бои находятся в competitions
-    competitions = event.get('competitions', [])
-    
-    for comp in competitions:
-        competitors = comp.get('competitors', [])
-        if len(competitors) >= 2:
-            # Получаем имена бойцов
-            fighter1 = competitors[0].get('athlete', {}).get('displayName', 'N/A')
-            fighter2 = competitors[1].get('athlete', {}).get('displayName', 'N/A')
-            # Получаем дополнительные данные
-            fighter1_id = competitors[0].get('athlete', {}).get('id')
-            fighter2_id = competitors[1].get('athlete', {}).get('id')
+            # Ищем имена в детальной странице боя
+            fighters = []
             
-            fights.append({
-                'fighter1': {'name': fighter1, 'id': fighter1_id},
-                'fighter2': {'name': fighter2, 'id': fighter2_id},
-                'competition_id': comp.get('id'),
-                'status': 'scheduled'  # ESPN не дает статус confirmed
-            })
-    
-    # ВАЖНО: возвращаем в ОБРАТНОМ порядке (главный бой последний)
-    fights_reversed = list(reversed(fights))
-    
-    logger.info(f"Извлечено боев из ESPN: {len(fights)}")
-    return fights
-
-# ==================== ТЕСТОВЫЙ ЗАПУСК ====================
-
-async def test_espn_api():
-    """Тестирование ESPN API"""
-    print("🔍 Тестирование ESPN UFC API...")
-    
-    # Получаем события
-    events = await fetch_upcoming_events()
-    
-    if not events:
-        print("❌ Не удалось получить события от ESPN")
-        return
-    
-    print(f"✅ Получено событий: {len(events)}")
-    
-    # Покажем все события для отладки
-    print("\n📅 Все предстоящие события:")
-    for i, event in enumerate(events[:5], 1):  # Показываем первые 5
-        event_date = parse_espn_date(event.get('date', ''))
-        date_str = event_date.strftime("%d.%m.%Y")
-        print(f"  {i}. {event.get('name', 'N/A')} - {date_str}")
-    
-    # Ищем следующий PPV
-    next_ppv = get_next_ppv_event(events)
-    
-    if next_ppv:
-        print(f"\n🎉 Найден следующий PPV турнир:")
-        print(f"   Название: {next_ppv.get('name')}")
-        
-        event_date = parse_espn_date(next_ppv.get('date', ''))
-        date_str = event_date.strftime("%d.%m.%Y %H:%M UTC")
-        print(f"   Дата: {date_str}")
-        print(f"   ID: {next_ppv.get('id')}")
-        
-        # Получаем бои
-        fights = get_event_fights_from_espn(next_ppv)
-        print(f"   Боев: {len(fights)}")
-        
-        for i, fight in enumerate(fights[:5], 1):  # Показываем первые 5
-            fighter1 = fight.get('fighter1', {}).get('name', 'N/A')
-            fighter2 = fight.get('fighter2', {}).get('name', 'N/A')
-            print(f"   {i}. {fighter1} vs {fighter2}")
-    else:
-        print("\n❌ PPV турниры не найдены среди событий")
+            # Способ 1: Ищем по классу b-fight-details__person-link
+            fighter_elements = soup.find_all("a", class_="b-fight-details__person-link")
+            
+            # Способ 2: Ищем по другим возможным классам
+            if not fighter_elements:
+                fighter_elements = soup.find_all("a", class_="b-link_style_black")
+            
+            for element in fighter_elements[:2]:  # Берем только первых двух
+                name = element.text.strip()
+                if name and name not in fighters:
+                    fighters.append(name)
+            
+            if len(fighters) >= 2:
+                return fighters[0], fighters[1]
+            else:
+                raise Exception(f"Не удалось получить обоих бойцов. Найдено: {fighters}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка парсинга боя {fight_url}: {e}")
+        raise
 
 
-
-
-
-
-# ==================== ТЕСТОВЫЕ ДАННЫЕ (для режима разработки) ====================
-
-def get_test_ppv_event() -> Dict:
-    """Возвращает тестовый PPV турнир для разработки - 15 боев"""
-    from datetime import datetime, timedelta, timezone
+def get_event_fights(event: Dict) -> List[Dict]:
+    """
+    Извлекает бои из структуры события для обратной совместимости
+    """
+    fights = event.get('fights', [])
     
-    # Турнир через 7 дней от текущей даты
+    result = []
+    for fight in fights:
+        result.append({
+            'fighter1': {'name': fight['fighter1'], 'id': None},
+            'fighter2': {'name': fight['fighter2'], 'id': None},
+            'competition_id': f'fight-{fight["order"]}',
+            'status': 'scheduled'
+        })
+    
+    logger.info(f"Извлечено боев: {len(result)}")
+    return result
+
+
+# ==================== ТЕСТОВЫЕ ДАННЫЕ ====================
+
+def _get_test_ppv_event() -> Dict:
+    """Тестовый турнир (только для DEBUG_MODE)"""
+    from datetime import timedelta
+    
     event_date = datetime.now(timezone.utc) + timedelta(days=7)
     
     return {
@@ -224,161 +291,57 @@ def get_test_ppv_event() -> Dict:
         'name': 'UFC 305: Тестовый турнир',
         'shortName': 'UFC 305',
         'date': event_date.isoformat().replace('+00:00', 'Z'),
-        'competitions': [
+        'url': 'http://ufcstats.com/event-details/test',
+        'fights': [
             {
-                'id': f'fight-{i}',
-                'competitors': [
-                    {
-                        'athlete': {
-                            'id': f'fighter_{i}_1',
-                            'displayName': f'Боец {i}A',
-                            'shortName': f'Fighter{i}A'
-                        }
-                    },
-                    {
-                        'athlete': {
-                            'id': f'fighter_{i}_2',
-                            'displayName': f'Боец {i}B',
-                            'shortName': f'Fighter{i}B'
-                        }
-                    }
-                ]
+                'order': i,
+                'fighter1': f'Боец {i}A',
+                'fighter2': f'Боец {i}B',
             }
-            for i in range(1, 16)  # 15 тестовых боев
+            for i in range(1, 13)
         ]
     }
 
-async def fetch_upcoming_events_with_fallback() -> Optional[List[Dict]]:
-    """
-    Получает события с fallback на тестовые данные если API не работает
-    или включен DEBUG_MODE
-    """
-    if config.DEBUG_MODE:
-        logger.info("Используем тестовые данные (DEBUG_MODE=True)")
-        return [get_test_ppv_event()]
-    
-    # Пробуем получить реальные данные
-    events = await fetch_upcoming_events()
-    
-    # Если не получили или список пустой, используем тестовые данные
-    if not events:
-        logger.info("API не вернул данные, используем тестовые")
-        return [get_test_ppv_event()]
-    
-    return events
 
 async def fetch_event_results(event_api_id: str) -> Optional[List[Dict]]:
-    """
-    Получает результаты завершенного турнира по его API ID
-    Возвращает список боев с результатами
-    """
+    """Заглушка для результатов"""
     if config.DEBUG_MODE:
-        logger.info("Используем тестовые результаты (DEBUG_MODE=True)")
-        return get_test_results()
-    
-    try:
-        # ESPN API для результатов
-        url = f"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/summary?event={event_api_id}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return parse_event_results(data)
-                else:
-                    logger.error(f"Ошибка ESPN API для event {event_api_id}: статус {response.status}")
-                    return None
-    except Exception as e:
-        logger.error(f"Ошибка получения результатов: {e}")
-        return None
+        return _get_test_results()
+    return None
 
-def parse_event_results(event_data: Dict) -> List[Dict]:
-    """
-    Парсит результаты боев из данных ESPN
-    """
-    fights = []
-    
-    competitions = event_data.get('competitions', [])
-    
-    for i, comp in enumerate(competitions, 1):
-        competitors = comp.get('competitors', [])
-        if len(competitors) >= 2:
-            fighter1 = competitors[0].get('athlete', {}).get('displayName', 'N/A')
-            fighter2 = competitors[1].get('athlete', {}).get('displayName', 'N/A')
-            
-            # Статус боя
-            status_type = comp.get('status', {}).get('type', {})
-            status_name = status_type.get('name', '').lower()
-            status_detail = status_type.get('detail', '').lower()
-            
-            winner = None
-            method = ''
-            
-            # Определяем победителя по статусу
-            if 'final' in status_name or 'result' in status_name:
-                # Бой завершен - проверяем who победил
-                for idx, competitor in enumerate(competitors, 1):
-                    if competitor.get('winner', False):
-                        winner = str(idx)
-                        break
-                
-                # Если не нашли winner флаг, проверяем по очкам (если есть)
-                if not winner and 'score' in comp:
-                    score1 = competitors[0].get('score', '0')
-                    score2 = competitors[1].get('score', '0')
-                    if score1 > score2:
-                        winner = '1'
-                    elif score2 > score1:
-                        winner = '2'
-                    else:
-                        winner = 'draw'
-                
-                method = status_detail
-            
-            elif 'no contest' in status_name or 'nc' in status_name:
-                winner = 'nc'
-                method = 'No Contest'
-            
-            elif 'draw' in status_name:
-                winner = 'draw'
-                method = 'Draw'
-            
-            elif 'canceled' in status_name or 'cancelled' in status_name:
-                winner = 'cancelled'
-                method = 'Canceled'
-            
-            # Если статус 'scheduled' или 'in progress' - winner остается None
-            
-            fights.append({
-                'fight_order': i,  # Порядковый номер
-                'fighter1_name': fighter1,
-                'fighter2_name': fighter2,
-                'winner': winner,  # None если бой еще не завершен
-                'method': method,
-                'status': status_name
-            })
-    
-    return fights
 
-def get_test_results() -> List[Dict]:
-    """Тестовые результаты для отладки - 15 боев с разными исходами"""
+def _get_test_results() -> List[Dict]:
+    """Тестовые результаты"""
     return [
         {'fight_order': 1, 'fighter1_name': 'Боец 1A', 'fighter2_name': 'Боец 1B', 'winner': '1', 'method': 'KO'},
-        {'fight_order': 2, 'fighter1_name': 'Боец 2A', 'fighter2_name': 'Боец 2B', 'winner': '2', 'method': 'Submission'},
-        {'fight_order': 3, 'fighter1_name': 'Боец 3A', 'fighter2_name': 'Боец 3B', 'winner': '1', 'method': 'Decision'},
-        {'fight_order': 4, 'fighter1_name': 'Боец 4A', 'fighter2_name': 'Боец 4B', 'winner': '2', 'method': 'TKO'},
-        {'fight_order': 5, 'fighter1_name': 'Боец 5A', 'fighter2_name': 'Боец 5B', 'winner': '1', 'method': 'KO'},
-        {'fight_order': 6, 'fighter1_name': 'Боец 6A', 'fighter2_name': 'Боец 6B', 'winner': '2', 'method': 'Decision'},
-        {'fight_order': 7, 'fighter1_name': 'Боец 7A', 'fighter2_name': 'Боец 7B', 'winner': '1', 'method': 'Submission'},
-        {'fight_order': 8, 'fighter1_name': 'Боец 8A', 'fighter2_name': 'Боец 8B', 'winner': 'draw', 'method': 'Draw'},  # НИЧЬЯ
-        {'fight_order': 9, 'fighter1_name': 'Боец 9A', 'fighter2_name': 'Боец 9B', 'winner': 'nc', 'method': 'No Contest'},  # НЕ СОСТОЯЛСЯ
-        {'fight_order': 10, 'fighter1_name': 'Боец 10A', 'fighter2_name': 'Боец 10B', 'winner': 'cancelled', 'method': 'Canceled'},  # ОТМЕНЕН
-        {'fight_order': 11, 'fighter1_name': 'Боец 11A', 'fighter2_name': 'Боец 11B', 'winner': '1', 'method': 'Decision'},
-        {'fight_order': 12, 'fighter1_name': 'Боец 12A', 'fighter2_name': 'Боец 12B', 'winner': '2', 'method': 'TKO'},
-        {'fight_order': 13, 'fighter1_name': 'Боец 13A', 'fighter2_name': 'Боец 13B', 'winner': '1', 'method': 'KO'},
-        {'fight_order': 14, 'fighter1_name': 'Боец 14A', 'fighter2_name': 'Боец 14B', 'winner': '2', 'method': 'Submission'},
-        {'fight_order': 15, 'fighter1_name': 'Боец 15A', 'fighter2_name': 'Боец 15B', 'winner': '1', 'method': 'Decision'}
     ]
 
+
+# ==================== ТЕСТ ====================
+
+async def test_api():
+    """Тест работы API"""
+    print("🔍 Тестирование UFC Stats API...")
+    
+    event = await get_upcoming_event()
+    
+    if not event:
+        print("❌ Не удалось получить событие")
+        return
+    
+    print(f"✅ Турнир: {event.get('name')}")
+    
+    fights = get_event_fights(event)
+    print(f"🥊 Боев: {len(fights)}")
+    
+    for i, fight in enumerate(fights[:5], 1):  # Показываем первые 5
+        f1 = fight.get('fighter1', {}).get('name', 'N/A')
+        f2 = fight.get('fighter2', {}).get('name', 'N/A')
+        print(f"  {i:2}. {f1:25} vs {f2}")
+    
+    if len(fights) > 5:
+        print(f"  ... и ещё {len(fights) - 5} боев")
+
+
 if __name__ == "__main__":
-    asyncio.run(test_espn_api())
+    asyncio.run(test_api())

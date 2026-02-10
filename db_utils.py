@@ -15,6 +15,22 @@ def get_session() -> AsyncSession:
 
 logger = logging.getLogger(__name__)
 
+def parse_iso_date(date_string: str) -> datetime:
+    """
+    Парсит дату из ISO формата (совместимость с ufcstats и ESPN)
+    СИНХРОННАЯ функция - не делает асинхронных операций
+    """
+    try:
+        # Формат ISO с Z (UTC) или со смещением
+        if 'Z' in date_string:
+            date_string = date_string.replace('Z', '+00:00')
+        
+        dt = datetime.fromisoformat(date_string)
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception as e:
+        logger.error(f"Ошибка парсинга даты '{date_string}': {e}")
+        return datetime.now(timezone.utc)
+
 # ==================== ФУНКЦИИ ОТЛАДКИ ====================
 
 async def debug_event_creation(session: AsyncSession, event_data: Dict, fights_data: List[Dict]):
@@ -28,8 +44,7 @@ async def debug_event_creation(session: AsyncSession, event_data: Dict, fights_d
         logger.info(f"Количество боев: {len(fights_data)}")
         
         # Парсим дату
-        from ufc_api import parse_espn_date
-        event_date_utc = parse_espn_date(event_data.get('date', ''))
+        event_date_utc = parse_iso_date(event_data.get('date', ''))
         logger.info(f"Парсинг даты: {event_date_utc}")
         
         # Проверяем год
@@ -77,8 +92,7 @@ async def create_event_from_api(
         await debug_event_creation(session, event_data, fights_data)
         
         # Парсим дату из API
-        from ufc_api import parse_espn_date
-        event_date_utc = parse_espn_date(event_data.get('date', ''))
+        event_date_utc = parse_iso_date(event_data.get('date', ''))
         
         # Определяем год
         year = event_date_utc.year
@@ -395,18 +409,16 @@ async def save_user_bets(
     user_id: int,
     event_id: int,
     bets_data: dict,
-    username: str = None,  # ДОБАВИТЬ
-    full_name: str = None  # ДОБАВИТЬ
+    username: str = None,
+    full_name: str = None
 ) -> bool:
-    
     try:
         # Проверяем, что пользователь существует
         user = await get_or_create_user(
             session, user_id, username, full_name
         )
         
-        # Удаляем старые ставки пользователя на этот турнир (если есть)
-        # ПРАВИЛЬНЫЙ СИНТАКСИС ДЛЯ SQLAlchemy 2.0
+        # Удаляем старые ставки пользователя на этот турнир
         from sqlalchemy import delete
         
         await session.execute(
@@ -453,7 +465,7 @@ async def save_user_bets(
         
     except Exception as e:
         await session.rollback()
-        logger.error(f"Ошибка сохранения ставок: {e}", exc_info=True)  # Добавим traceback
+        logger.error(f"Ошибка сохранения ставок: {e}", exc_info=True)
         return False
 
 async def get_events_for_odds_edit(session: AsyncSession) -> List[Event]:
@@ -655,22 +667,22 @@ async def calculate_user_points_for_event(session: AsyncSession, user_id: int, e
                 points = float(bet.odds_at_bet) if bet.odds_at_bet else 0.0
                 total_points += points
                 
-                # Обновляем статус ставки - КОРРЕКТНЫЙ ТИП ДАННЫХ
+                # Обновляем статус ставки
                 bet.status = 'win'
-                bet.points_earned = float(points)  # Важно: приводим к float
+                bet.points_earned = float(points)
                 logger.info(f"✅ ВЫИГРЫШ: +{points} очков")
                 
             elif fight.winner in ['draw', 'nc', 'cancelled', None]:
                 # Бой не состоялся или нет результата
                 cancelled_fights.append(bet.fight_id)
                 bet.status = 'cancelled'
-                bet.points_earned = 0.0  # float вместо Decimal
+                bet.points_earned = 0.0
                 logger.info(f"➖ ОТМЕНА: бой {fight.fight_order} - {fight.winner}")
                 
             else:
                 # Не угадал
                 bet.status = 'lose'
-                bet.points_earned = 0.0  # float вместо Decimal
+                bet.points_earned = 0.0
                 logger.info(f"❌ ПРОИГРЫШ")
         
         # Если есть отмененные бои и есть страховочная ставка
@@ -682,12 +694,12 @@ async def calculate_user_points_for_event(session: AsyncSession, user_id: int, e
                 points = float(insurance_bet.odds_at_bet) if insurance_bet.odds_at_bet else 0.0
                 total_points += points
                 insurance_bet.status = 'win'
-                insurance_bet.points_earned = float(points)  # float вместо Decimal
+                insurance_bet.points_earned = float(points)
                 used_insurance = True
                 logger.info(f"🛡️ СТРАХОВКА СЫГРАЛА: +{points} очков")
             else:
                 insurance_bet.status = 'lose'
-                insurance_bet.points_earned = 0.0  # float вместо Decimal
+                insurance_bet.points_earned = 0.0
                 logger.info(f"🛡️ СТРАХОВКА НЕ СЫГРАЛА")
         
         logger.info(f"ИТОГО ОЧКОВ: {total_points}")
@@ -712,12 +724,10 @@ async def is_event_finished(session: AsyncSession, event_id: int) -> bool:
         
         # Проверяем, есть ли бои без результата
         for fight in fights:
-            # ⚠️ ИСПРАВЛЕНО: проверяем не только None, но и пустую строку
             if fight.winner is None or fight.winner == '':
-                return False  # Нашли бой без результата
+                return False
         
-        return True  # Все бои имеют результат
-        
+        return True
     except Exception as e:
         logger.error(f"Ошибка проверки завершенности турнира: {e}")
         return False
@@ -734,7 +744,6 @@ async def mark_event_as_finished(session: AsyncSession, event_id: int) -> bool:
             logger.info(f"Турнир {event_id} помечен как завершенный")
             return True
         elif event and event.status == 'finished':
-            # Турнир уже завершен, возвращаем True
             logger.info(f"Турнир {event_id} уже завершен")
             return True
         return False
@@ -760,33 +769,8 @@ async def get_unfinished_events(session: AsyncSession) -> List[Event]:
     for event in events:
         fights = await get_fights_for_event(session, event.id)
         if fights:
-            # Проверяем, есть ли бои без результата
             has_unfinished_fights = any(fight.winner is None for fight in fights)
             if has_unfinished_fights:
                 unfinished_events.append(event)
     
     return unfinished_events
-    
-if __name__ == "__main__":
-    # Тест утилит
-    import asyncio
-    
-    async def test():
-        async with async_session() as session:
-            # Создаем тестового пользователя
-            user = await get_or_create_user(
-                session, 
-                user_id=123456,
-                username="test_user",
-                full_name="Test User"
-            )
-            print(f"Пользователь: {user.user_id}, баланс: {user.total_balance}")
-            
-            # Получаем текущий турнир
-            event = await get_current_event(session)
-            if event:
-                print(f"Текущий турнир: {event.title}")
-            else:
-                print("Активных турниров нет")
-    
-    asyncio.run(test())
