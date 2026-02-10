@@ -94,10 +94,6 @@ async def _get_fights_from_event(session: aiohttp.ClientSession, event_url: str)
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # ДЛЯ ОТЛАДКИ: сохраним HTML чтобы посмотреть структуру
-            with open("debug_event_page.html", "w", encoding="utf-8") as f:
-                f.write(html[:5000])  # Первые 5000 символов
-            
             # Ищем ВСЕХ бойцов на странице турнира
             # На странице турнира бойцы в таблице или списке
             

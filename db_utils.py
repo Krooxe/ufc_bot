@@ -202,6 +202,11 @@ async def get_or_create_user(
     
     return user
 
+async def get_all_users(session: AsyncSession) -> List[User]:
+    """Получает всех пользователей"""
+    result = await session.execute(select(User).order_by(User.created_at.desc()))
+    return result.scalars().all()
+
 async def get_user_bets_for_event(
     session: AsyncSession,
     user_id: int,
