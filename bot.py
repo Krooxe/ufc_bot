@@ -94,11 +94,6 @@ async def cmd_start(message: Message):
     except Exception as e:
         logger.error(f"Ошибка создания пользователя: {e}")
 
-@dp.message(Command("menu"))
-async def cmd_menu(message: Message):
-    """Команда /menu для возврата в главное меню"""
-    await message.answer("Главное меню:", reply_markup=get_main_menu())
-
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     """Команда /admin - только для админа"""
@@ -115,229 +110,6 @@ async def cmd_admin(message: Message):
     
     await message.answer(text, reply_markup=get_admin_menu(), parse_mode="HTML")
     logger.info(f"Админ вошел: {message.from_user.id}")
-
-@dp.message(Command("generatetestdata"))
-async def cmd_generate_test_data(message: Message):
-    """Генерация тестовых архивных данных за прошлый и текущий год"""
-    if message.from_user.id != config.ADMIN_ID:
-        await message.answer("⛔ Только для админа")
-        return
-    
-    await message.answer("🧪 Создаю тестовые архивные данные...")
-    
-    try:
-        from db_utils import get_session, create_event_from_api
-        from ufc_api import get_test_ppv_event, get_event_fights_from_espn, get_test_results
-        from database import User, Bet, Fight, Event
-        from sqlalchemy import select
-        from datetime import datetime, timezone, timedelta
-        import random
-        
-        async with get_session() as session:
-            # СНАЧАЛА КОММИТИМ ВСЕ ОТКРЫТЫЕ ТРАНЗАКЦИИ
-            await session.commit()
-
-            # Получаем всех пользователей бота
-            users_result = await session.execute(select(User))
-            all_users = users_result.scalars().all()
-            
-            # ЛОГГИРУЕМ ДЛЯ ОТЛАДКИ
-            logger.info(f"=== DEBUG: Найдено пользователей: {len(all_users)} ===")
-            for i, user in enumerate(all_users, 1):
-                logger.info(f"Пользователь {i}: ID={user.user_id}, username={user.username}, full_name={user.full_name}")
-
-            if not all_users:
-                await message.answer("❌ Нет пользователей в базе. Сначала зайдите в бота.")
-                return
-            
-            current_year = datetime.now(timezone.utc).year
-            previous_year = current_year - 1
-            
-            # Создаем тестовые турниры
-            test_events = []
-            
-            # 2 турнира за предыдущий год
-            for i in range(2):
-                event_data = get_test_ppv_event()
-                # Меняем дату на прошлый год
-                old_date = datetime.now(timezone.utc) - timedelta(days=300 - i*50)
-                
-                ufc_number = 200 + i  # UFC 200, UFC 201
-                event_data['date'] = old_date.replace(year=previous_year).isoformat().replace('+00:00', 'Z')
-                event_data['name'] = f"UFC {ufc_number}: Турнир {previous_year} года #{i+1}"
-                event_data['shortName'] = f"UFC {ufc_number}"
-                event_data['id'] = ufc_number  # ID = номеру UFC
-                
-                fights_data = get_event_fights_from_espn(event_data)
-                event = await create_event_from_api(session, event_data, fights_data)
-                
-                if event:
-                    # Открываем для ставок и сразу закрываем (прошлогодний)
-                    event.status = 'finished'
-                    
-                    # Генерируем результаты для каждого боя
-                    fights = await session.execute(
-                        select(Fight).where(Fight.event_id == event.id).order_by(Fight.fight_order)
-                    )
-                    fights_list = fights.scalars().all()
-                    
-                    # Тестовые результаты (разные для каждого турнира)
-                    for fight in fights_list:
-                        # Разные исходы для разнообразия
-                        rand = random.random()
-                        if rand < 0.05:  # 5% - ничья
-                            fight.winner = 'draw'
-                        elif rand < 0.1:  # 5% - не состоялся
-                            fight.winner = 'nc'
-                        elif rand < 0.15:  # 5% - отменен
-                            fight.winner = 'cancelled'
-                        else:
-                            fight.winner = '1' if random.random() > 0.5 else '2'
-                        
-                        # Коэффициенты
-                        fight.odds1 = round(1.3 + random.random() * 0.7, 2)
-                        fight.odds2 = round(1.5 + random.random() * 0.8, 2)
-                    
-                    test_events.append(event)
-            
-            # 2 турнира за текущий год
-            for i in range(2):
-                event_data = get_test_ppv_event()
-                # Меняем дату на недавнее прошлое
-                recent_date = datetime.now(timezone.utc) - timedelta(days=30 - i*15)
-                
-                ufc_number = 202 + i  # UFC 202, UFC 203
-                event_data['date'] = recent_date.replace(year=current_year).isoformat().replace('+00:00', 'Z')
-                event_data['name'] = f"UFC {ufc_number}: Турнир {current_year} года #{i+1}"
-                event_data['shortName'] = f"UFC {ufc_number}"
-                event_data['id'] = ufc_number  # ID = номеру UFC
-                
-                fights_data = get_event_fights_from_espn(event_data)
-                event = await create_event_from_api(session, event_data, fights_data)
-                
-                if event:
-                    event.status = 'finished'
-                    
-                    # Коэффициенты
-                    fights = await session.execute(
-                        select(Fight).where(Fight.event_id == event.id).order_by(Fight.fight_order)
-                    )
-                    fights_list = fights.scalars().all()
-                    
-                    for fight in fights_list:
-                        fight.odds1 = round(1.3 + random.random() * 0.7, 2)
-                        fight.odds2 = round(1.5 + random.random() * 0.8, 2)
-                        
-                        # Результаты (для текущего года - больше выигрышей)
-                        rand = random.random()
-                        if rand < 0.03:  # 3% - ничья
-                            fight.winner = 'draw'
-                        elif rand < 0.06:  # 3% - не состоялся
-                            fight.winner = 'nc'
-                        else:
-                            fight.winner = '1' if random.random() > 0.4 else '2'
-                    
-                    test_events.append(event)
-            
-            await session.commit()
-            
-            # Создаем тестовые ставки для каждого пользователя на каждый турнир
-            for user in all_users:
-                for event in test_events:
-                    # Проверяем, нет ли уже ставок
-                    existing_bets = await session.execute(
-                        select(Bet).where(
-                            Bet.user_id == user.user_id,
-                            Bet.event_id == event.id
-                        )
-                    )
-                    if existing_bets.scalar_one_or_none():
-                        continue  # Уже есть ставки
-                    
-                    # Получаем бои турнира
-                    fights = await session.execute(
-                        select(Fight)
-                        .where(Fight.event_id == event.id)
-                        .order_by(Fight.fight_order)
-                    )
-                    fights_list = fights.scalars().all()
-                    
-                    if len(fights_list) < 6:
-                        continue
-                    
-                    # Выбираем 5 случайных основных боев (первые 10 боев)
-                    main_fights = random.sample(fights_list[:10], 5)
-                    # Страховочный бой из оставшихся
-                    remaining_fights = [f for f in fights_list if f not in main_fights]
-                    insurance_fight = random.choice(remaining_fights) if remaining_fights else None
-                    
-                    # Основные ставки
-                    for fight in main_fights:
-                        chosen_fighter = 1 if random.random() > 0.5 else 2
-                        odds = fight.odds1 if chosen_fighter == 1 else fight.odds2
-                        
-                        bet = Bet(
-                            user_id=user.user_id,
-                            event_id=event.id,
-                            fight_id=fight.id,
-                            bet_type='main',
-                            chosen_fighter=chosen_fighter,
-                            odds_at_bet=odds,
-                            status='win' if str(chosen_fighter) == fight.winner else 'lose',
-                            points_earned=float(odds) if str(chosen_fighter) == fight.winner else 0.0
-                        )
-                        session.add(bet)
-                    
-                    # Страховочная ставка
-                    if insurance_fight:
-                        chosen_fighter = 1 if random.random() > 0.5 else 2
-                        odds = insurance_fight.odds1 if chosen_fighter == 1 else insurance_fight.odds2
-                        
-                        bet = Bet(
-                            user_id=user.user_id,
-                            event_id=event.id,
-                            fight_id=insurance_fight.id,
-                            bet_type='insurance',
-                            chosen_fighter=chosen_fighter,
-                            odds_at_bet=odds,
-                            status='win' if str(chosen_fighter) == insurance_fight.winner else 'lose',
-                            points_earned=float(odds) if str(chosen_fighter) == insurance_fight.winner else 0.0
-                        )
-                        session.add(bet)
-            
-            await session.commit()
-            
-            # Обновляем балансы пользователей
-            for user in all_users:
-                from sqlalchemy import func
-                bets_result = await session.execute(
-                    select(func.sum(Bet.points_earned))
-                    .where(Bet.user_id == user.user_id)
-                )
-                total_points = bets_result.scalar_one_or_none() or 0.0
-                user.total_balance = float(total_points)
-            
-            await session.commit()
-            
-            # Статистика
-            events_count = len(test_events)
-            users_count = len(all_users)
-            
-            await message.answer(
-                f"✅ <b>Тестовые данные созданы!</b>\n\n"
-                f"• Турниров: {events_count}\n"
-                f"• Игроков: {users_count}\n"
-                f"• Годы: {previous_year} и {current_year}\n\n"
-                f"Теперь можно:\n"
-                f"1. Проверить архив\n"
-                f"2. Проверить общий рейтинг\n"
-                f"3. Создать новый турнир для теста",
-                parse_mode="HTML"
-            )
-                
-    except Exception as e:
-        logger.error(f"Ошибка создания тестового турнира: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 # ==================== ОБРАБОТЧИКИ INLINE-КНОПОК ====================
 
@@ -2455,54 +2227,6 @@ async def process_confirm_main(callback: CallbackQuery):
         logger.error(f"Ошибка в confirm_main: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
-@dp.message(Command("updateresults"))
-async def cmd_update_results(message: Message):
-    """Обновление результатов всех незавершенных турниров"""
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    
-    await message.answer("🔄 Проверяю незавершенные турниры...")
-    
-    try:
-        from db_utils import get_session, update_event_results_from_api, get_unfinished_events
-        
-        async with get_session() as session:
-            # Получаем незавершенные турниры
-            unfinished_events = await get_unfinished_events(session)
-            
-            if not unfinished_events:
-                await message.answer("✅ Все турниры уже завершены!")
-                return
-            
-            updated = []
-            failed = []
-            
-            for event in unfinished_events:
-                success = await update_event_results_from_api(session, event)
-                if success:
-                    updated.append(event.title)
-                else:
-                    failed.append(event.title)
-            
-            # Формируем отчет
-            report = f"📊 <b>Обновление результатов</b>\n\n"
-            report += f"Проверено турниров: {len(unfinished_events)}\n\n"
-            
-            if updated:
-                report += f"✅ <b>Обновлены результаты:</b>\n"
-                for title in updated:
-                    report += f"• {title}\n"
-            
-            if failed:
-                report += f"\n❌ <b>Не удалось обновить:</b>\n"
-                for title in failed:
-                    report += f"• {title}\n"
-            
-            await message.answer(report, parse_mode="HTML")
-            
-    except Exception as e:
-        logger.error(f"Ошибка обновления результатов: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 @dp.callback_query(lambda c: c.data == "admin_close_event")
 async def process_admin_close_event(callback: CallbackQuery):
@@ -2965,6 +2689,24 @@ async def handle_all_messages(message: Message):
                 reply_markup=get_main_menu()
             )
 
+from aiogram.types import BotCommand, BotCommandScopeDefault
+
+# -----------------------
+# Установка команд в меню бота
+# -----------------------
+async def set_bot_commands():
+    """
+    Устанавливает команды бота, которые будут видны в меню
+    """
+    commands = [
+        BotCommand(command="start", description="🚀 Запустить бота"),
+        BotCommand(command="admin", description="⚙️ Админ-панель"),
+        BotCommand(command="cleardb", description="🗑️ Очистить БД (только админ)"),
+    ]
+    
+    await bot.set_my_commands(commands)  # <-- используем глобальный bot
+    logger.info("Команды бота установлены в меню")
+
 # ==================== ЗАПУСК БОТА ====================
 
 async def main():
@@ -2975,13 +2717,21 @@ async def main():
     logger.info("=" * 50)
     
     try:
+        # 1. Устанавливаем команды в меню бота
+        await set_bot_commands()
+        logger.info("✅ Команды бота установлены")
+        
+        # 2. Создаем таблицы БД
         await create_tables()
         logger.info("✅ База данных готова")
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка БД: {e}")
+        logger.error(f"❌ Ошибка инициализации: {e}")
         return
     
+    # 3. Запускаем бота
     try:
+        logger.info("✅ Бот запущен и готов к работе")
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"❌ Ошибка бота: {e}")
@@ -2991,5 +2741,6 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+        print("ЭСУКАБЛЯ!")
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
