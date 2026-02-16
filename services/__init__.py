@@ -4,7 +4,7 @@ Services layer - бизнес-логика приложения
 """
 
 # Session management
-from .session import get_session, parse_iso_date
+from .session import get_session  # убрали parse_iso_date
 
 # Event service
 from .event_service import *
@@ -26,6 +26,6 @@ from .settings_service import *
 
 __all__ = [
     'get_session',
-    'parse_iso_date',
+    # parse_iso_date удалён из __all__
     # Остальные функции экспортируются через *
 ]

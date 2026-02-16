@@ -80,7 +80,7 @@ async def get_upcoming_event() -> Optional[Dict]:
                 logger.info(f"Найден турнир: {event_title}")
             
             # 2. Получаем бои этого турнира
-            from ufc_api import _get_fights_from_event
+            from .fights import _get_fights_from_event
             fights = await _get_fights_from_event(session, event_url)
             
             logger.info(f"Получено боёв: {len(fights)}")

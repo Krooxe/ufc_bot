@@ -157,11 +157,14 @@ async def process_set_insurance(callback: CallbackQuery):
         betting_data['insurance_fight_id'] = fight_id
         betting_data['insurance_winner'] = chosen_fighter
         
-        # Показываем финальное подтверждение
-        callback.data = f"save_bets:{event_id}"
-        
+        # Вместо изменения callback.data, просто вызываем нужную функцию напрямую
         from .save import show_final_confirmation
-        await show_final_confirmation(callback)
+        
+        # Создаём новый callback_data для передачи
+        fake_callback = callback
+        # Не изменяем callback.data, а передаём event_id параметром
+        
+        await show_final_confirmation(callback, event_id)  # Передаём event_id отдельно
         
     except Exception as e:
         logger.error(f"Ошибка в set_insurance: {e}", exc_info=True)

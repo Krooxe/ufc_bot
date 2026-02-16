@@ -33,21 +33,21 @@ async def start_odds_input(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
     try:
-        from db_utils import get_session, get_draft_events, get_fights_for_event
+        from db_utils import get_session, get_open_or_draft_events, get_fights_for_event
         
         async with get_session() as session:
-            # Получаем черновик (единственный)
-            drafts = await get_draft_events(session)
+            # Получаем турниры, доступные для ввода коэффициентов (draft или open_for_bets)
+            events = await get_open_or_draft_events(session)
             
-            if not drafts:
+            if not events:
                 await callback.message.edit_text(
-                    "❌ Нет черновиков турниров.\n\nСоздайте турнир сначала.",
+                    "❌ Нет турниров для ввода коэффициентов.\n\nСоздайте турнир сначала.",
                     reply_markup=get_admin_menu()
                 )
                 return
             
-            # Берём первый (единственный) черновик
-            event = drafts[0]
+            # Берём первый доступный турнир
+            event = events[0]
             fights = await get_fights_for_event(session, event.id)
             
             if not fights:
@@ -64,7 +64,7 @@ async def start_odds_input(callback: CallbackQuery, state: FSMContext):
             # Формируем сообщение с боями
             text = (
                 f"📥 <b>Ввод коэффициентов</b>\n\n"
-                f"🏆 <b>{event.title}</b>\n\n"
+                f"🏆 <b>{event.title}</b> (статус: {event.status})\n\n"
                 f"<b>Список боёв:</b>\n"
             )
             

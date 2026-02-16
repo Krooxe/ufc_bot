@@ -7,7 +7,8 @@ Database Utils - Реэкспорт всех функций из services/
 """
 
 # Импортируем всё из services
-from services.session import get_session, parse_iso_date
+from services.session import get_session
+from utils.date_utils import parse_iso_date  # поменяли путь
 from services.event_service import *
 from services.fight_service import *
 from services.user_service import *

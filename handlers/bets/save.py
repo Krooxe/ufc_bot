@@ -15,11 +15,15 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-async def show_final_confirmation(callback: CallbackQuery):
+async def show_final_confirmation(callback: CallbackQuery, event_id: int = None):
     """Показывает финальное подтверждение перед сохранением"""
     try:
-        event_id = int(callback.data.split(":")[1])
+        if event_id is None:
+            # Если event_id не передан, берём из callback.data
+            event_id = int(callback.data.split(":")[1])
+        
         user_id = callback.from_user.id
+        # ... остальной код без изменений
         
         betting_data = temp_event_data.get('betting_data', {}).get(user_id)
         

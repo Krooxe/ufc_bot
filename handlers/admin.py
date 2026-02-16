@@ -292,95 +292,159 @@ async def process_admin_open_betting(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "admin_close_event")
 async def process_admin_close_event(callback: CallbackQuery):
-    """Показ меню закрытия турнира"""
+    """Закрытие турнира - автоматическое получение результатов из API"""
     if callback.from_user.id != config.ADMIN_ID:
         await callback.answer("⛔ Нет доступа!", show_alert=True)
         return
     
-    await callback.answer()
+    await callback.answer("🔄 Получаю результаты из UFC API...")
     
     try:
         from db_utils import get_session, get_open_event_with_fights
+        from api.results import get_todays_ufc_event_results
         
         async with get_session() as session:
             event_data = await get_open_event_with_fights(session)
             
             if not event_data:
-                text = "🏁 <b>Закрыть турнир</b>\n\nНет открытых турниров для закрытия."
-                keyboard = get_admin_menu()
-            else:
-                event = event_data['event']
-                fights = event_data['fights']
-                
+                await callback.message.edit_text(
+                    "🏁 <b>Закрытие турнира</b>\n\n"
+                    "Нет открытых турниров для закрытия.",
+                    reply_markup=get_admin_menu(),
+                    parse_mode="HTML"
+                )
+                return
+            
+            event = event_data['event']
+            fights = event_data['fights']
+            
+            # Получаем результаты из API
+            api_results = get_todays_ufc_event_results()
+            
+            if not api_results:
+                # Если API не вернул результаты, показываем ошибку
                 text = (
-                    f"🏁 <b>Закрыть турнир</b>\n\n"
+                    f"🏁 <b>Закрытие турнира</b>\n\n"
                     f"🏆 <b>{event.title}</b>\n"
                     f"📅 {event.date_utc.strftime('%d.%m.%Y')}\n"
                     f"🥊 Боев: {len(fights)}\n\n"
-                    f"Для закрытия турнира нужно:\n"
-                    f"1. Ввести результаты всех боёв\n"
-                    f"2. Подтвердить расчёт очков\n"
-                    f"3. Закрыть турнир\n\n"
-                    f"<b>Выберите действие:</b>"
+                    f"❌ <b>Не удалось получить результаты из UFC API!</b>\n\n"
+                    f"Возможные причины:\n"
+                    f"• Турнир ещё не завершён\n"
+                    f"• Проблемы с доступом к API\n"
+                    f"• Результаты ещё не опубликованы\n\n"
+                    f"Попробуйте позже или введите результаты вручную."
                 )
                 
                 buttons = [
-                    [InlineKeyboardButton(text="📝 Ввести результаты боёв", callback_data=f"admin_input_results:{event.id}")],
-                    [InlineKeyboardButton(text="🔢 Рассчитать очки", callback_data=f"admin_calculate_points:{event.id}")],
-                    [InlineKeyboardButton(text="✅ Финализировать турнир", callback_data=f"admin_confirm_close:{event.id}")],
+                    [InlineKeyboardButton(text="📝 Ввести вручную", callback_data=f"admin_input_results:{event.id}")],
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
                 ]
                 
                 keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+                return
             
+            # Сопоставляем результаты с нашими боями
+            text = (
+                f"🏁 <b>Закрытие турнира</b>\n\n"
+                f"🏆 <b>{event.title}</b>\n"
+                f"📅 {event.date_utc.strftime('%d.%m.%Y')}\n"
+                f"🥊 Боев: {len(fights)}\n\n"
+                f"<b>📊 Результаты с UFC API:</b>\n\n"
+            )
+            
+            # Создаем словарь для обновления результатов
+            results_to_save = []
+            matches_found = 0
+            
+            for fight in fights:
+                # Ищем соответствующий результат
+                result = next(
+                    (r for r in api_results if 
+                     (r['fighter1'] in fight.fighter1_name and r['fighter2'] in fight.fighter2_name) or
+                     (r['fighter1'] in fight.fighter2_name and r['fighter2'] in fight.fighter1_name)),
+                    None
+                )
+                
+                if result:
+                    matches_found += 1
+                    
+                    # Определяем победителя (1 или 2)
+                    if result['winner'] == 'draw':
+                        winner_display = "🤝 Ничья"
+                        winner_value = 'draw'
+                    elif result['winner'] == 'nc':
+                        winner_display = "❌ Не состоялся"
+                        winner_value = 'nc'
+                    else:
+                        # Проверяем, какой боец победил
+                        if result['winner'] == fight.fighter1_name or result['winner'] in fight.fighter1_name:
+                            winner_display = f"✅ {fight.fighter1_name}"
+                            winner_value = '1'
+                        elif result['winner'] == fight.fighter2_name or result['winner'] in fight.fighter2_name:
+                            winner_display = f"✅ {fight.fighter2_name}"
+                            winner_value = '2'
+                        else:
+                            winner_display = f"✅ {result['winner']}"
+                            winner_value = result['winner']
+                    
+                    # Сохраняем для последующего обновления
+                    results_to_save.append({
+                        'fight_id': fight.id,
+                        'winner': winner_value
+                    })
+                    
+                    text += f"<b>Бой {fight.fight_order}:</b> {fight.fighter1_name} vs {fight.fighter2_name}\n"
+                    text += f"   → {winner_display}\n"
+                else:
+                    text += f"<b>Бой {fight.fight_order}:</b> {fight.fighter1_name} vs {fight.fighter2_name}\n"
+                    text += f"   → ⚠️ <i>Результат не найден</i>\n"
+            
+            text += f"\n<b>Найдено результатов:</b> {matches_found}/{len(fights)}\n\n"
+            
+            if matches_found == len(fights):
+                # Сохраняем результаты во временное хранилище
+                from utils.states import temp_event_data
+                user_id = callback.from_user.id
+                if 'closing_results' not in temp_event_data:
+                    temp_event_data['closing_results'] = {}
+                temp_event_data['closing_results'][user_id] = {
+                    'event_id': event.id,
+                    'results': results_to_save
+                }
+                
+                text += "<b>Все результаты получены. Закрыть турнир?</b>"
+                buttons = [
+                    [InlineKeyboardButton(text="✅ Да, закрыть", callback_data=f"admin_execute_close:{event.id}")],
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_status")]
+                ]
+            else:
+                text += (
+                    f"⚠️ <b>Не все результаты найдены!</b>\n"
+                    f"Можно:\n"
+                    f"• Попробовать снова позже\n"
+                    f"• Ввести оставшиеся вручную"
+                )
+                buttons = [
+                    [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="admin_close_event")],
+                    [InlineKeyboardButton(text="📝 Ввести вручную", callback_data=f"admin_input_results:{event.id}")],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
+                ]
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
             
     except Exception as e:
         logger.error(f"Ошибка close_event: {e}", exc_info=True)
         await callback.message.edit_text(
-            "❌ Ошибка",
+            f"❌ Ошибка: {str(e)[:100]}",
             reply_markup=get_admin_menu()
         )
 
-
-@router.callback_query(lambda c: c.data.startswith("admin_confirm_close:"))
-async def process_admin_confirm_close(callback: CallbackQuery):
-    """Подтверждение закрытия турнира"""
-    if callback.from_user.id != config.ADMIN_ID:
-        await callback.answer("⛔ Нет доступа!", show_alert=True)
-        return
-    
-    try:
-        event_id = int(callback.data.split(":")[1])
-        await callback.answer()
-        
-        text = (
-            "⚠️ <b>Подтверждение закрытия турнира</b>\n\n"
-            "Вы уверены, что хотите закрыть турнир?\n\n"
-            "После закрытия:\n"
-            "• Нельзя будет изменить результаты\n"
-            "• Турнир переместится в архив\n"
-            "• Очки будут зачислены игрокам\n\n"
-            "<b>Продолжить?</b>"
-        )
-        
-        buttons = [
-            [InlineKeyboardButton(text="✅ Да, закрыть", callback_data=f"admin_execute_close:{event_id}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_close_event")]
-        ]
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        
-    except Exception as e:
-        logger.error(f"Ошибка confirm_close: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
-
-
-@router.callback_query(lambda c: c.data.startswith("admin_execute_close:"))
-async def process_admin_execute_close(callback: CallbackQuery):
-    """Финальное выполнение закрытия турнира"""
+@router.callback_query(lambda c: c.data.startswith("admin_force_close:"))
+async def process_admin_force_close(callback: CallbackQuery):
+    """Принудительное закрытие турнира (пропуская бои без результатов)"""
     if callback.from_user.id != config.ADMIN_ID:
         await callback.answer("⛔ Нет доступа!", show_alert=True)
         return
@@ -389,78 +453,159 @@ async def process_admin_execute_close(callback: CallbackQuery):
         event_id = int(callback.data.split(":")[1])
         await callback.answer("🔄 Закрываю турнир...")
         
-        from db_utils import get_session, get_event_by_id
-        from database import Event
+        from db_utils import get_session, get_event_by_id, get_fights_for_event
+        from db_utils import calculate_points_for_event
         
         async with get_session() as session:
             event = await get_event_by_id(session, event_id)
+            fights = await get_fights_for_event(session, event_id)
             
-            if event:
-                event.status = 'finished'
-                await session.commit()
-                
+            # Считаем только бои с результатами
+            fights_with_results = [f for f in fights if f.winner]
+            
+            if not fights_with_results:
                 await callback.message.edit_text(
-                    f"✅ <b>Турнир закрыт!</b>\n\n"
-                    f"🏆 {event.title}\n"
-                    f"📊 Статус: {event.status}\n\n"
-                    f"Турнир перемещён в архив.",
-                    reply_markup=get_admin_menu(),
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.edit_text(
-                    "❌ Турнир не найден",
+                    "❌ Нет ни одного боя с результатом!",
                     reply_markup=get_admin_menu()
                 )
-                
+                return
+            
+            # Рассчитываем очки только по боям с результатами
+            points_result = await calculate_points_for_event(session, event_id)
+            
+            if not points_result:
+                await callback.message.edit_text(
+                    "❌ Ошибка при расчёте очков",
+                    reply_markup=get_admin_menu()
+                )
+                return
+            
+            event.status = 'finished'
+            await session.commit()
+            
+            report = (
+                f"✅ <b>Турнир принудительно закрыт!</b>\n\n"
+                f"🏆 <b>{event.title}</b>\n"
+                f"📊 <b>Статистика:</b>\n"
+                f"• Всего боёв: {len(fights)}\n"
+                f"• Боев с результатами: {len(fights_with_results)}\n"
+                f"• Боев без результатов: {len(fights) - len(fights_with_results)}\n"
+                f"• Обработано ставок: {points_result.get('total_bets', 0)}\n"
+                f"• Обновлено игроков: {points_result.get('updated', 0)}\n\n"
+                f"⚠️ <i>Бои без результатов не учитывались в расчёте!</i>\n\n"
+                f"🏁 Турнир перемещён в архив."
+            )
+            
+            await callback.message.edit_text(
+                report,
+                reply_markup=get_admin_menu(),
+                parse_mode="HTML"
+            )
+            
     except Exception as e:
-        logger.error(f"Ошибка execute_close: {e}", exc_info=True)
+        logger.error(f"Ошибка force_close: {e}", exc_info=True)
         await callback.message.edit_text(
             f"❌ Ошибка: {str(e)[:100]}",
             reply_markup=get_admin_menu()
         )
 
-
-# ============ РАСЧЁТ ОЧКОВ ============
-
-@router.callback_query(lambda c: c.data.startswith("admin_calculate_points:"))
-async def process_admin_calculate_points(callback: CallbackQuery):
-    """Расчёт очков для турнира"""
+@router.callback_query(lambda c: c.data.startswith("admin_execute_close:"))
+async def process_admin_execute_close(callback: CallbackQuery):
+    """Финальное закрытие турнира с автоматическим расчётом"""
     if callback.from_user.id != config.ADMIN_ID:
         await callback.answer("⛔ Нет доступа!", show_alert=True)
         return
     
     try:
         event_id = int(callback.data.split(":")[1])
-        await callback.answer("🔄 Рассчитываю очки...")
+        await callback.answer("🔄 Закрываю турнир и рассчитываю очки...")
         
-        from db_utils import calculate_points_for_event, get_session
+        from db_utils import get_session, get_event_by_id, get_fights_for_event
+        from db_utils import calculate_points_for_event
+        from database import Event, Fight
         
         async with get_session() as session:
-            result = await calculate_points_for_event(session, event_id)
-            
-            if result:
+            # 1. Получаем турнир
+            event = await get_event_by_id(session, event_id)
+            if not event:
                 await callback.message.edit_text(
-                    f"✅ <b>Очки рассчитаны!</b>\n\n"
-                    f"Обработано ставок: {result.get('total_bets', 0)}\n"
-                    f"Обновлено: {result.get('updated', 0)}\n\n"
-                    f"Теперь можно закрыть турнир.",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="✅ Закрыть турнир", callback_data=f"admin_confirm_close:{event_id}")],
-                        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_close_event")]
-                    ]),
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.edit_text(
-                    "❌ Ошибка расчёта очков",
+                    "❌ Турнир не найден",
                     reply_markup=get_admin_menu()
                 )
+                return
+            
+            # 2. Проверяем, есть ли сохранённые результаты из API
+            from utils.states import temp_event_data
+            user_id = callback.from_user.id
+            saved_results = temp_event_data.get('closing_results', {}).get(user_id)
+            
+            if saved_results and saved_results['event_id'] == event_id:
+                # Обновляем результаты из API
+                for result in saved_results['results']:
+                    fight = await session.get(Fight, result['fight_id'])
+                    if fight:
+                        fight.winner = result['winner']
+                await session.commit()
+                logger.info(f"Обновлены результаты для {len(saved_results['results'])} боёв из API")
                 
+                # Очищаем временные данные
+                del temp_event_data['closing_results'][user_id]
+            
+            # 3. Проверяем, что все результаты введены
+            fights = await get_fights_for_event(session, event_id)
+            missing_results = [f for f in fights if not f.winner]
+            
+            if missing_results:
+                # Показываем, каких результатов не хватает
+                text = f"❌ Не введены результаты для {len(missing_results)} боёв:\n"
+                for fight in missing_results[:5]:
+                    text += f"• Бой {fight.fight_order}: {fight.fighter1_name} vs {fight.fighter2_name}\n"
+                if len(missing_results) > 5:
+                    text += f"• ... и ещё {len(missing_results) - 5}\n"
+                
+                await callback.message.edit_text(
+                    text + "\nСначала введите результаты.",
+                    reply_markup=get_admin_menu()
+                )
+                return
+            
+            # 4. Рассчитываем очки для всех игроков
+            points_result = await calculate_points_for_event(session, event_id)
+            
+            if not points_result:
+                await callback.message.edit_text(
+                    "❌ Ошибка при расчёте очков",
+                    reply_markup=get_admin_menu()
+                )
+                return
+            
+            # 5. Меняем статус турнира
+            event.status = 'finished'
+            await session.commit()
+            
+            # 6. Формируем отчёт
+            report = (
+                f"✅ <b>Турнир успешно закрыт!</b>\n\n"
+                f"🏆 <b>{event.title}</b>\n"
+                f"📊 <b>Статистика:</b>\n"
+                f"• Всего боёв: {len(fights)}\n"
+                f"• Обработано ставок: {points_result.get('total_bets', 0)}\n"
+                f"• Обновлено игроков: {points_result.get('updated', 0)}\n\n"
+                f"🏁 Турнир перемещён в архив."
+            )
+            
+            await callback.message.edit_text(
+                report,
+                reply_markup=get_admin_menu(),
+                parse_mode="HTML"
+            )
+            
     except Exception as e:
-        logger.error(f"Ошибка calculate_points: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
-
+        logger.error(f"Ошибка execute_close: {e}", exc_info=True)
+        await callback.message.edit_text(
+            f"❌ Ошибка: {str(e)[:100]}",
+            reply_markup=get_admin_menu()
+        )
 
 # ============ ОБНОВЛЕНИЕ ОДНОГО БОЯ ============
 
