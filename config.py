@@ -11,7 +11,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
 # Режим разработки (True = использовать тестовые данные, False = использовать реальный API)
-DEBUG_MODE = False  # Поставьте False, когда будете готовы к реальным данным
+DEBUG_MODE = True  # Поставьте False, когда будете готовы к реальным данным
 
 # Настройки базы данных
 DB_NAME = "ufc_bot_test.db" if DEBUG_MODE else "ufc_bot.db"

@@ -1,13 +1,28 @@
 """
-UFC Stats API - показывает ВЕСЬ кард турнира
+UFC Results API - получение результатов турниров
+Парсинг результатов боёв с ufcstats.com
 """
+import logging
 import requests
-from bs4 import BeautifulSoup
+import aiohttp
+from typing import Optional, List, Dict
 from datetime import datetime
+from bs4 import BeautifulSoup
 import re
 
-def parse_date(date_str):
-    """Парсит дату из UFC Stats формата"""
+logger = logging.getLogger(__name__)
+
+
+def parse_date(date_str: str) -> Optional[datetime]:
+    """
+    Парсит дату из UFC Stats формата
+    
+    Args:
+        date_str: Строка с датой (например "February 07, 2024")
+        
+    Returns:
+        datetime или None если не удалось распарсить
+    """
     try:
         date_str = date_str.strip()
         for fmt in ('%B %d, %Y', '%b %d, %Y'):
@@ -18,10 +33,21 @@ def parse_date(date_str):
     except Exception:
         return None
 
+
 def get_todays_ufc_event_results() -> list:
     """
     Находит турнир с датой сегодня или ранее и возвращает его результаты
-    ВОЗВРАЩАЕТ ВСЕ БОИ!
+    
+    ВАЖНО: Возвращает ВСЕ бои с определёнными победителями!
+    
+    Returns:
+        List[Dict]: Список боёв с победителями
+            [{
+                'fight_order': 1,
+                'fighter1': 'Name A',
+                'fighter2': 'Name B',
+                'winner': 'Name A' | 'draw' | 'nc'
+            }]
     """
     try:
         # 1. Получаем список всех турниров
@@ -31,6 +57,7 @@ def get_todays_ufc_event_results() -> list:
         
         table = soup.find('table', class_='b-statistics__table-events')
         if not table:
+            logger.error("Не найдена таблица турниров")
             return []
         
         rows = table.find_all('tr')[1:]  # Пропускаем заголовок
@@ -59,26 +86,34 @@ def get_todays_ufc_event_results() -> list:
                 
                 # Проверяем что турнир уже прошел (дата <= сегодня)
                 if event_date <= today:
-                    print(f"✅ Найден подходящий турнир: {event_name} ({event_date.strftime('%d.%m.%Y')})")
-                    print(f"🔗 Ссылка: {event_url}")
+                    logger.info(f"Найден завершённый турнир: {event_name} ({event_date.strftime('%d.%m.%Y')})")
                     
                     # 2. Получаем бои этого турнира - ВСЕ!
                     fights = get_event_fights(event_url)
                     return fights
                     
             except Exception as e:
-                print(f"Ошибка обработки строки: {e}")
+                logger.warning(f"Ошибка обработки турнира: {e}")
                 continue
         
-        print("❌ Не найден подходящий турнир (с датой <= сегодня)")
+        logger.warning("Не найден подходящий турнир (с датой <= сегодня)")
         return []
         
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка get_todays_ufc_event_results: {e}")
         return []
 
+
 def get_event_fights(event_url: str) -> list:
-    """Получает ВСЕ бои конкретного турнира"""
+    """
+    Получает ВСЕ бои конкретного турнира с результатами
+    
+    Args:
+        event_url: URL турнира на ufcstats.com
+        
+    Returns:
+        List[Dict]: Список боёв с результатами
+    """
     try:
         response = requests.get(event_url, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -87,12 +122,12 @@ def get_event_fights(event_url: str) -> list:
         fights_table = soup.find('table', class_='b-fight-details__table')
         
         if not fights_table:
-            print("❌ Не найдена таблица боев")
+            logger.error("Не найдена таблица боев")
             return []
         
         rows = fights_table.find_all('tr')[1:]  # Пропускаем заголовок
         
-        print(f"📊 Найдено строк в таблице: {len(rows)}")
+        logger.info(f"Найдено строк в таблице: {len(rows)}")
         
         for i, row in enumerate(rows, 1):
             try:
@@ -105,36 +140,50 @@ def get_event_fights(event_url: str) -> list:
                     # Определяем победителя
                     winner = fighter1  # по умолчанию первый
                     
-                    # Ищем маркеры
+                    # Ищем маркеры W/L/D/NC
                     cells = row.find_all('td')
                     for cell in cells:
                         text = cell.get_text(strip=True)
-                        if text == 'L':
+                        if text == 'L':  # Loss - проиграл первый
                             winner = fighter2
                             break
-                        elif text == 'D':
+                        elif text == 'D':  # Draw - ничья
                             winner = 'draw'
                             break
-                        elif text == 'NC':
+                        elif text == 'NC':  # No Contest
                             winner = 'nc'
                             break
                     
                     fights.append({
-                        'fight_order': i,  # Сохраняем порядковый номер
+                        'fight_order': i,
                         'fighter1': fighter1,
                         'fighter2': fighter2,
                         'winner': winner
                     })
                     
-                    print(f"  Бой {i}: {fighter1} vs {fighter2} → {winner}")
+                    logger.debug(f"Бой {i}: {fighter1} vs {fighter2} → {winner}")
                     
             except Exception as e:
-                print(f"  ❌ Ошибка парсинга боя {i}: {e}")
+                logger.warning(f"Ошибка парсинга боя {i}: {e}")
                 continue
         
-        print(f"✅ Всего получено {len(fights)} боев")
+        logger.info(f"Всего получено {len(fights)} боев")
         return fights
         
     except Exception as e:
-        print(f"❌ Ошибка получения боев: {e}")
+        logger.error(f"Ошибка получения боев: {e}")
         return []
+
+
+async def fetch_event_results(event_api_id: str) -> Optional[List[Dict]]:
+    """
+    Получает результаты турнира (асинхронная версия)
+    
+    TODO: Реализовать асинхронную версию если нужно
+    Пока используйте get_todays_ufc_event_results()
+    """
+    # Можно вызвать синхронную версию
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, get_todays_ufc_event_results)
+    return result
