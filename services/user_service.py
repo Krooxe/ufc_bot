@@ -17,37 +17,53 @@ async def get_or_create_user(
     full_name: str = None
 ) -> User:
     """Получает или создает пользователя, обновляет данные если изменились"""
-    result = await session.execute(
-        select(User).where(User.user_id == user_id)
-    )
-    user = result.scalar_one_or_none()
-    
-    if not user:
-        # Создаем нового пользователя
-        user = User(
-            user_id=user_id,
-            username=username,
-            full_name=full_name
+    try:
+        # Сначала пробуем найти пользователя
+        result = await session.execute(
+            select(User).where(User.user_id == user_id)
         )
-        session.add(user)
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            # Создаем нового пользователя
+            logger.info(f"Создаю нового пользователя: {user_id}")
+            user = User(
+                user_id=user_id,
+                username=username,
+                full_name=full_name,
+                total_balance=0.0
+            )
+            session.add(user)
+            await session.flush()  # Только получаем ID, но не коммитим полностью
+            logger.info(f"Создан новый пользователь: {user_id}")
+        else:
+            # ОБНОВЛЯЕМ данные пользователя, если они изменились
+            updated = False
+            if username and user.username != username:
+                user.username = username
+                updated = True
+            if full_name and user.full_name != full_name:
+                user.full_name = full_name
+                updated = True
+            
+            if updated:
+                logger.info(f"Обновлены данные пользователя: {user_id}")
+        
+        # Один коммит в конце
         await session.commit()
-        logger.info(f"Создан новый пользователь: {user_id}")
         return user
-    else:
-        # ОБНОВЛЯЕМ данные пользователя, если они изменились
-        updated = False
-        if username and user.username != username:
-            user.username = username
-            updated = True
-        if full_name and user.full_name != full_name:
-            user.full_name = full_name
-            updated = True
         
-        if updated:
-            await session.commit()
-            logger.info(f"Обновлены данные пользователя: {user_id}")
-        
-        return user
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Ошибка в get_or_create_user для {user_id}: {e}")
+        # Пробуем получить пользователя ещё раз на случай гонки
+        result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if user:
+            return user
+        raise
 
 
 async def get_all_users(session: AsyncSession) -> List[User]:

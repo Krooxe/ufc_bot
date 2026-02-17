@@ -52,7 +52,7 @@ async def process_admin_announce(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
         ]),
         parse_mode="HTML"
     )

@@ -77,10 +77,10 @@ async def process_confirm_main(callback: CallbackQuery):
                 elif winner_chosen == 2:
                     status = f"✅ {fight.fighter2_name}"
                 else:
-                    status = "❓ Не выбрано"
+                    status = "❓ Боец не выбран"
                 
                 text += f"<b>Бой {fight.fight_order}:</b> {fight.fighter1_name} ({odds1}) vs {fight.fighter2_name} ({odds2})\n"
-                text += f"<i>Выбор:</i> {status}\n\n"
+                text += f"<i>Ставка:</i> {status}\n\n"
             
             text += f"<b>Выбрано победителей:</b> {len(selected_winners)}/5\n"
             text += "<i>Нажмите на бой, чтобы выбрать победителя</i>"

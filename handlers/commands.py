@@ -20,30 +20,39 @@ router = Router()
 async def cmd_start(message: Message):
     """Обработка команды /start"""
     user = message.from_user
-    
-    welcome_text = (
-        f"👊 Привет, {user.first_name}!\n\n"
-        f"Я бот для ставок на UFC. Твой ID: {user.id}\n"
-        "Следи за турнирами, делай ставки и соревнуйся с друзьями!\n\n"
-        "⬇️ Используй меню ниже:"
-    )
-    
-    await message.answer(welcome_text, reply_markup=get_main_menu())
+    balance = 0  # значение по умолчанию
     
     # СОЗДАЁМ/ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ В БАЗЕ
     try:
-        from db_utils import get_session, get_or_create_user
+        from db_utils import get_session, get_or_create_user, get_user_balance
         
         async with get_session() as session:
+            # Создаём/получаем юзера
             db_user = await get_or_create_user(
                 session,
                 user.id,
                 user.username,
                 user.full_name
             )
+            
+            # Получаем баланс
+            from services.user_service import get_user_balance
+            balance = await get_user_balance(session, user.id)
+            
             logger.info(f"Пользователь в БД: {db_user.user_id} - {db_user.username}")
     except Exception as e:
         logger.error(f"Ошибка создания пользователя: {e}")
+    
+    # Формируем новое приветствие
+    welcome_text = (
+        f"👊 Привет, {user.full_name}!\n\n"
+        f"Я бот для ставок на UFC.\n"
+        f"Следи за турнирами, делай ставки и соревнуйся с друзьями!\n\n"
+        f"💰 Твой текущий результат: {balance} очков\n\n"
+        f"⬇️ Используй меню ниже:"
+    )
+    
+    await message.answer(welcome_text, reply_markup=get_main_menu())
 
 
 @router.message(Command("admin"))
@@ -55,8 +64,7 @@ async def cmd_admin(message: Message):
     
     text = (
         f"⚙️ <b>Админ-панель</b>\n\n"
-        f"Привет, админ {message.from_user.first_name}!\n"
-        f"ID: {message.from_user.id}\n\n"
+        f"Привет, админ {message.from_user.first_name}!\n\n"
         f"Выберите действие:"
     )
     
@@ -66,18 +74,39 @@ async def cmd_admin(message: Message):
 
 @router.message(Command("cleardb"))
 async def cmd_clear_db(message: Message):
-    """Полная очистка ТЕСТОВОЙ БД (только админ)"""
+    """Полная очистка базы данных (работает только в DEBUG_MODE)"""
     if message.from_user.id != config.ADMIN_ID:
         return
     
-    await message.answer(f"🗑️ Очищаю ТЕСТОВУЮ базу данных ({config.DB_NAME})...")
+    # Защита от случайной очистки продакшн БД
+    if not config.DEBUG_MODE:
+        await message.answer(
+            "❌ Команда cleardb доступна только в DEBUG_MODE!\n"
+            "Для продакшн базы используйте ручное управление."
+        )
+        return
     
-    from database import engine, Base
+    await message.answer(f"🗑️ Очищаю базу данных ({config.DB_NAME})...")
     
-    async def clear_all():
+    try:
+        from database import engine, Base
+        import os
+        
+        # Закрываем все соединения
+        await engine.dispose()
+        
+        # Удаляем файл БД
+        if os.path.exists(config.DB_NAME):
+            os.remove(config.DB_NAME)
+            await message.answer(f"✅ Файл {config.DB_NAME} удалён")
+        
+        # Создаём таблицы заново
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
-    
-    await clear_all()
-    await message.answer(f"✅ Тестовая база данных полностью очищена и пересоздана")
+        
+        await message.answer(f"✅ База данных полностью пересоздана")
+        logger.info(f"БД {config.DB_NAME} очищена и пересоздана админом {message.from_user.id}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка cleardb: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")

@@ -269,17 +269,6 @@ async def process_view_archive(callback: CallbackQuery):
                 
                 text += "\n"
             
-            # Статистика турнира
-            text += "<b>📊 Статистика турнира:</b>\n"
-            players_with_bets = sum(1 for p in players_data if p['has_bets'])
-            max_points = max((p['tournament_points'] for p in players_data), default=0)
-            avg_points = sum(p['tournament_points'] for p in players_data) / len(players_data) if players_data else 0
-            
-            text += f"• Участников: {len(players_data)}\n"
-            text += f"• Сделали ставки: {players_with_bets}\n"
-            text += f"• Максимум очков: {max_points:.2f}\n"
-            text += f"• Среднее: {avg_points:.2f} очков\n"
-            
             # Кнопки
             buttons = [
                 [InlineKeyboardButton(text="⬅️ Назад в архив", callback_data="menu_archive")]

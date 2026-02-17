@@ -16,11 +16,28 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+# ============ НОВЫЙ ОБРАБОТЧИК ДЛЯ ВОЗВРАТА ============
+
+@router.callback_query(lambda c: c.data == "admin_back")
+async def process_admin_back(callback: CallbackQuery):
+    """Возврат в главное меню админки"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    
+    await callback.answer()
+    await callback.message.edit_text(
+        "🛠 <b>Админ-панель</b>\n\nВыберите действие:",
+        reply_markup=get_admin_menu(),
+        parse_mode="HTML"
+    )
+
+
 # ============ ГЛАВНОЕ МЕНЮ АДМИНКИ ============
 
 @router.callback_query(lambda c: c.data.startswith("admin_") and c.data not in [
     "admin_announce", "admin_close_event", "admin_create_draft", 
-    "admin_create_from_api", "admin_create_manual", "admin_add_odds"  # ← Добавил в исключения
+    "admin_create_from_api", "admin_create_manual", "admin_add_odds", "admin_back"
 ] and not any(c.data.startswith(prefix) for prefix in [
     "admin_input_odds:",
     "admin_edit_odds:",
@@ -44,11 +61,6 @@ async def process_admin_commands(callback: CallbackQuery):
             # Создание нового PPV турнира
             await callback.answer()
             await show_create_ppv_menu(callback)
-            
-        elif command == "admin_status":
-            # Показ статуса системы
-            await callback.answer()
-            await show_system_status(callback)
             
         else:
             await callback.answer("Функция в разработке", show_alert=True)
@@ -83,7 +95,7 @@ async def process_create_from_api(callback: CallbackQuery):
                 "• Проблемы с доступом к API\n\n"
                 "Попробуйте создать турнир вручную.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_new_ppv")]
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
                 ]),
                 parse_mode="HTML"
             )
@@ -106,7 +118,7 @@ async def process_create_from_api(callback: CallbackQuery):
         
         buttons = [
             [InlineKeyboardButton(text="✅ Создать турнир", callback_data="admin_create_draft")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_new_ppv")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
         ]
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -120,29 +132,29 @@ async def process_create_from_api(callback: CallbackQuery):
         )
 
 
-@router.callback_query(lambda c: c.data == "admin_create_manual")
-async def process_create_manual(callback: CallbackQuery):
-    """Ручное создание турнира (будущий функционал)"""
-    if callback.from_user.id != config.ADMIN_ID:
-        await callback.answer("⛔ Нет доступа!", show_alert=True)
-        return
+# @router.callback_query(lambda c: c.data == "admin_create_manual")
+# async def process_create_manual(callback: CallbackQuery):
+#     """Ручное создание турнира (будущий функционал)"""
+#     if callback.from_user.id != config.ADMIN_ID:
+#         await callback.answer("⛔ Нет доступа!", show_alert=True)
+#         return
     
-    await callback.answer()
+#     await callback.answer()
     
-    text = (
-        "📝 <b>Ручное создание турнира</b>\n\n"
-        "Эта функция пока в разработке.\n\n"
-        "Сейчас доступно только создание через UFC API.\n\n"
-        "Хотите попробовать загрузить турнир из API?"
-    )
+#     text = (
+#         "📝 <b>Ручное создание турнира</b>\n\n"
+#         "Эта функция пока в разработке.\n\n"
+#         "Сейчас доступно только создание через UFC API.\n\n"
+#         "Хотите попробовать загрузить турнир из API?"
+#     )
     
-    buttons = [
-        [InlineKeyboardButton(text="🌐 Загрузить из API", callback_data="admin_create_from_api")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_new_ppv")]
-    ]
+#     buttons = [
+#         [InlineKeyboardButton(text="🌐 Загрузить из API", callback_data="admin_create_from_api")],
+#         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
+#     ]
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+#     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+#     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ============ СОЗДАНИЕ ТУРНИРА ============
@@ -156,8 +168,8 @@ async def show_create_ppv_menu(callback: CallbackQuery):
     
     buttons = [
         [InlineKeyboardButton(text="🌐 Загрузить из UFC API", callback_data="admin_create_from_api")],
-        [InlineKeyboardButton(text="📝 Создать вручную", callback_data="admin_create_manual")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
+        # [InlineKeyboardButton(text="📝 Создать вручную", callback_data="admin_create_manual")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
     ]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -223,7 +235,7 @@ async def process_create_draft(callback: CallbackQuery):
                 
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📥 Ввести коэффициенты", callback_data="admin_add_odds")],
-                    [InlineKeyboardButton(text="↩️ В админ-панель", callback_data="admin_status")]
+                    [InlineKeyboardButton(text="↩️ В админ-панель", callback_data="admin_back")]
                 ])
                 
                 await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -338,7 +350,7 @@ async def process_admin_close_event(callback: CallbackQuery):
                 
                 buttons = [
                     [InlineKeyboardButton(text="📝 Ввести вручную", callback_data=f"admin_input_results:{event.id}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
                 ]
                 
                 keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -417,7 +429,7 @@ async def process_admin_close_event(callback: CallbackQuery):
                 text += "<b>Все результаты получены. Закрыть турнир?</b>"
                 buttons = [
                     [InlineKeyboardButton(text="✅ Да, закрыть", callback_data=f"admin_execute_close:{event.id}")],
-                    [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_status")]
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
                 ]
             else:
                 text += (
@@ -429,7 +441,7 @@ async def process_admin_close_event(callback: CallbackQuery):
                 buttons = [
                     [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="admin_close_event")],
                     [InlineKeyboardButton(text="📝 Ввести вручную", callback_data=f"admin_input_results:{event.id}")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_status")]
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
                 ]
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -656,66 +668,3 @@ async def process_admin_update_single(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка update_single: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
-
-
-# ============ СТАТУС СИСТЕМЫ ============
-
-async def show_system_status(callback: CallbackQuery):
-    """Показ статуса системы"""
-    try:
-        from db_utils import get_session
-        from database import User, Event, Bet
-        from sqlalchemy import select, func
-        
-        async with get_session() as session:
-            # Статистика
-            users_count = await session.scalar(select(func.count(User.user_id)))
-            events_count = await session.scalar(select(func.count(Event.id)))
-            bets_count = await session.scalar(select(func.count(Bet.id)))
-            
-            # Текущий турнир
-            current_event = await session.scalar(
-                select(Event).where(Event.status == 'open_for_bets').limit(1)
-            )
-            
-            # Черновики
-            draft_events = await session.scalars(
-                select(Event).where(Event.status == 'draft')
-            )
-            draft_count = len(list(draft_events.all()))
-            
-            text = (
-                "ℹ️ <b>Статус системы</b>\n\n"
-                f"👥 Пользователей: {users_count}\n"
-                f"🏆 Турниров: {events_count}\n"
-                f"🎯 Ставок: {bets_count}\n"
-                f"📝 Черновиков: {draft_count}\n\n"
-            )
-            
-            if current_event:
-                text += f"📊 <b>Активный турнир:</b>\n{current_event.title}\n"
-            else:
-                text += "📊 Активных турниров нет\n"
-            
-            try:
-                await callback.message.edit_text(
-                    text,
-                    reply_markup=get_admin_menu(),
-                    parse_mode="HTML"
-                )
-            except Exception as edit_error:
-                # Если сообщение не изменилось - просто отвечаем
-                if "message is not modified" in str(edit_error):
-                    await callback.answer("✅ Статус обновлён")
-                else:
-                    raise
-            
-    except Exception as e:
-        logger.error(f"Ошибка show_system_status: {e}", exc_info=True)
-        try:
-            await callback.message.edit_text(
-                "❌ Ошибка загрузки статуса",
-                reply_markup=get_admin_menu()
-            )
-        except:
-            await callback.answer("❌ Ошибка", show_alert=True)

@@ -15,20 +15,9 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-@router.callback_query(lambda c: c.data == "menu_balance")
-async def process_balance(callback: CallbackQuery):
-    """Показывает баланс пользователя"""
-    try:
-        await callback.answer()
-        text = "💰 <b>Твой баланс:</b> 0.00 очков\n\nЗдесь будут твои очки и статистика."
-        await callback.message.edit_text(text, reply_markup=get_back_button(), parse_mode="HTML")
-    except Exception as e:
-        logger.warning(f"Ошибка в process_balance: {e}")
-
-
 @router.callback_query(lambda c: c.data == "menu_current")
 async def process_current(callback: CallbackQuery):
-    """Показывает текущий турнир с детальной информацией о ставках"""
+    """Показывает текущий турнир с информацией о ставках"""
     try:
         await callback.answer()
         
@@ -56,11 +45,8 @@ async def process_current(callback: CallbackQuery):
                 callback.from_user.username,
                 callback.from_user.full_name
             )
-
-            # ДОБАВЛЯЕМ СРАЗУ ПОСЛЕ СОЗДАНИЯ ПОЛЬЗОВАТЕЛЯ:
-            #await session.commit()
             
-            # 3. Получаем ВСЕХ пользователей (наших игроков)
+            # 3. Получаем ВСЕХ пользователей
             users_result = await session.execute(
                 select(User).order_by(User.created_at.asc())
             )
@@ -79,12 +65,10 @@ async def process_current(callback: CallbackQuery):
                     bets_by_user[bet.user_id] = []
                 bets_by_user[bet.user_id].append(bet)
             
-            # Создаем словарь для быстрого поиска боев
+            # Словарь для быстрого поиска боев
             fights_dict = {fight.id: fight for fight in fights}
             
-            # 5. Формируем текст
-            
-            # Информация о турнире
+            # 5. Информация о турнире
             tournament_info = (
                 f"🥊 <b>Текущий турнир</b>\n\n"
                 f"🏆 <b>{event.title}</b>\n"
@@ -93,16 +77,16 @@ async def process_current(callback: CallbackQuery):
                 f"👥 <b>Участников:</b> {len(all_users)}\n\n"
             )
             
-                        # Ставки текущего пользователя
+            # 6. Ставки текущего пользователя
             user_bets_text = ""
             if callback.from_user.id in bets_by_user:
                 user_bets_text = "🎯 <b>Ваши ставки:</b>\n"
                 
-                # Получаем и сортируем ставки пользователя
+                # Получаем ставки пользователя
                 user_bets_list = bets_by_user[callback.from_user.id]
                 main_bets = [b for b in user_bets_list if b.bet_type == 'main']
                 
-                # Создаем список для сортировки
+                # Сортируем основные ставки
                 sorted_main_bets = []
                 for bet in main_bets:
                     fight = fights_dict.get(bet.fight_id)
@@ -113,10 +97,9 @@ async def process_current(callback: CallbackQuery):
                             'fight': fight
                         })
                 
-                # СОРТИРУЕМ по fight_order
                 sorted_main_bets.sort(key=lambda x: x['fight_order'])
                 
-                # Выводим отсортированные ставки
+                # Выводим основные ставки
                 for item in sorted_main_bets:
                     bet = item['bet']
                     fight = item['fight']
@@ -136,83 +119,35 @@ async def process_current(callback: CallbackQuery):
             else:
                 user_bets_text = "🎯 <b>Ваши ставки:</b> пока нет\n"
             
-                        # Ставки других игроков (ПОЛНЫЙ СПИСОК)
-            other_players_text = "\n<b>👥 Ставки других игроков:</b>\n"
-            players_without_bets = 0
-            players_with_bets = 0
+            # 7. Статистика турнира
+            players_with_bets = len([u for u in all_users if u.user_id in bets_by_user])
+            players_without_bets = len(all_users) - players_with_bets
             
-            for other_user in all_users:
-                if other_user.user_id == callback.from_user.id:
-                    continue  # Пропускаем текущего пользователя
-                
-                username = other_user.username or other_user.full_name or f"Игрок {other_user.user_id}"
-                
-                if other_user.user_id in bets_by_user:
-                    players_with_bets += 1
-                    other_players_text += f"\n<b>{username}:</b>\n"
-                    
-                    # Получаем все ставки этого игрока
-                    user_bets_list = bets_by_user[other_user.user_id]
-                    
-                    # Разделяем основные и страховочные
-                    main_bets = [b for b in user_bets_list if b.bet_type == 'main']
-                    insurance_bets = [b for b in user_bets_list if b.bet_type == 'insurance']
-                    
-                    # СОРТИРУЕМ основные ставки по fight_order
-                    sorted_main_bets = []
-                    for bet in main_bets:
-                        fight = fights_dict.get(bet.fight_id)
-                        if fight:
-                            sorted_main_bets.append({
-                                'bet': bet,
-                                'fight_order': fight.fight_order,
-                                'fight': fight
-                            })
-                    
-                    sorted_main_bets.sort(key=lambda x: x['fight_order'])
-                    
-                    # Показываем ВСЕ основные ставки (как у себя)
-                    for item in sorted_main_bets:
-                        bet = item['bet']
-                        fight = item['fight']
-                        fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                        # Для других игроков НЕ показываем коэффициенты (чтобы не спойлерить)
-                        other_players_text += f"• Бой {fight.fight_order}: {fighter_name}\n"
-                    
-                    # Страховочная ставка (если есть)
-                    if insurance_bets:
-                        bet = insurance_bets[0]
-                        fight = fights_dict.get(bet.fight_id)
-                        if fight:
-                            fighter_name = fight.fighter1_name if bet.chosen_fighter == 1 else fight.fighter2_name
-                            other_players_text += f"• 🛡️ Страховка (бой {fight.fight_order}): {fighter_name}\n"
-                else:
-                    players_without_bets += 1
-                    other_players_text += f"\n<b>{username}:</b> ставку ещё не делал\n"
+            stats_text = f"\n<b>📊 Статистика турнира:</b>\n"
+            stats_text += f"• 👥 Всего участников: {len(all_users)}\n"
+            stats_text += f"• 🎯 Сделали ставки: {players_with_bets}\n"
+            stats_text += f"• ⏳ Ещё не поставили: {players_without_bets}\n"
             
-            # Статистика
-            stats_text = f"\n<b>📊 Статистика:</b>\n"
-            stats_text += f"• Сделали ставки: {players_with_bets} игроков\n"
-            stats_text += f"• Ждут: {players_without_bets} игроков\n"
             if event.status == 'open_for_bets':
-                stats_text += f"• Статус: <b>принимаются ставки</b> ✅\n"
+                stats_text += f"• ✅ Статус: <b>принимаются ставки</b>\n"
             else:
-                stats_text += f"• Статус: <b>{event.status}</b>\n"
+                stats_text += f"• 📝 Статус: <b>{event.status}</b>\n"
             
-            # Собираем весь текст
-            text = tournament_info + user_bets_text + other_players_text + stats_text
+            # 8. Собираем весь текст
+            text = tournament_info + user_bets_text + stats_text
             
-            # Кнопки
+            # 9. Кнопки
             buttons = []
             if callback.from_user.id not in bets_by_user:
                 buttons.append([InlineKeyboardButton(text="🎯 Сделать ставки", callback_data=f"make_bets:{event.id}")])
             else:
                 buttons.append([InlineKeyboardButton(text="✏️ Изменить ставки", callback_data=f"make_bets:{event.id}")])
-                buttons.append([InlineKeyboardButton(text="📊 Детали моих ставок", callback_data=f"my_bets_detail:{event.id}")])
+                # buttons.append([InlineKeyboardButton(text="📊 Детали моих ставок", callback_data=f"my_bets_detail:{event.id}")])
             
             buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         
+        # 10. Отправляем сообщение
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         
     except Exception as e:
@@ -303,6 +238,48 @@ async def process_back(callback: CallbackQuery):
     """Возврат в главное меню"""
     try:
         await callback.answer()
-        await callback.message.edit_text("Главное меню:", reply_markup=get_main_menu())
+        
+        user = callback.from_user
+        user_id = user.id
+        
+        # Получаем данные из БД
+        from db_utils import get_session
+        from services.user_service import get_user_balance
+        from services.event_service import get_active_event
+        
+        async with get_session() as session:
+            # Баланс юзера
+            balance = await get_user_balance(session, user_id)
+            
+            # Активный турнир
+            active_event = await get_active_event(session)
+            
+            # Формируем текст
+            if active_event:
+                # Определяем статус турнира
+                if active_event.status == "open_for_bets":
+                    status_text = "✅ открыт для ставок"
+                elif active_event.status == "draft":
+                    status_text = "⏳ скоро откроется"
+                elif active_event.status == "finished":
+                    status_text = "🏁 турнир завершён"
+                else:
+                    status_text = f"статус: {active_event.status}"
+                
+                text = (
+                    f"👋 {user.full_name}\n\n"
+                    f"🥊 {active_event.title}\n"
+                    f"📌 {status_text}\n\n"
+                    f"💰 Твой результат: {balance} очков"
+                )
+            else:
+                text = (
+                    f"👋 {user.full_name}\n\n"
+                    f"На текущий момент открытого турнира нет.\n\n"
+                    f"💰 Твой результат: {balance} очков"
+                )
+        
+        await callback.message.edit_text(text, reply_markup=get_main_menu())
+        
     except Exception as e:
         logger.warning(f"Ошибка в process_back: {e}")

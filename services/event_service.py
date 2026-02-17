@@ -313,6 +313,16 @@ async def mark_event_as_finished(session: AsyncSession, event_id: int) -> bool:
         return False
 
 
+async def get_active_event(session: AsyncSession):
+    """Получить текущий активный турнир (не finished)"""
+    from database import Event
+    from sqlalchemy import select
+    
+    result = await session.execute(
+        select(Event).where(Event.status != "finished").order_by(Event.date_utc.desc())
+    )
+    return result.scalar_one_or_none()
+
 # ============ ОБНОВЛЕНИЕ КОЭФФИЦИЕНТОВ ============
 
 async def update_fight_odds_batch(
