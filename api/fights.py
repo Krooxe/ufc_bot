@@ -26,18 +26,29 @@ async def _get_fights_from_event(session: aiohttp.ClientSession, event_url: str)
             
             fights = []
             
-            # Ищем таблицу с боями
-            fights_table = soup.find("table", {"class": "b-fight-details__table"})
+            # DEBUG: Смотрим что на странице
+            all_tables = soup.find_all("table")
+            logger.info(f"DEBUG: Всего таблиц на странице: {len(all_tables)}")
+            for i, t in enumerate(all_tables[:3], 1):
+                classes = t.get('class', [])
+                logger.info(f"DEBUG: Таблица {i} классы: {classes}")
+            
+            # Ищем таблицу с боями (может иметь несколько классов)
+            fights_table = soup.find("table", class_=lambda x: x and "b-fight-details__table" in x)
             if not fights_table:
-                fights_table = soup.find("table", {"class": "b-statistics__table"})
+                fights_table = soup.find("table", class_=lambda x: x and "b-statistics__table" in x)
+            
+            logger.info(f"DEBUG: fights_table найдена: {fights_table is not None}")
             
             if fights_table:
-                # Получаем ссылки на детальные страницы боёв
+                # Получаем ссылки на детальные страницы боёв из data-link атрибутов строк
                 fight_links = []
-                for a in fights_table.find_all("a", href=re.compile("fight-details")):
-                    href = a.get("href")
-                    if href and href not in fight_links:
-                        fight_links.append(href)
+                
+                # Ищем все строки с data-link
+                for tr in fights_table.find_all("tr", attrs={"data-link": True}):
+                    fight_url = tr.get("data-link")
+                    if fight_url and "fight-details" in fight_url and fight_url not in fight_links:
+                        fight_links.append(fight_url)
                 
                 logger.info(f"Найдено {len(fight_links)} ссылок на детальные страницы боёв")
                 
@@ -98,7 +109,7 @@ async def _parse_fight_details(session: aiohttp.ClientSession, fight_url: str) -
                 return fighter1, fighter2
             
             # Способ 3: Ищем имена в таблице
-            tables = soup.find_all("table", class_="b-fight-details__table")
+            tables = soup.find_all("table", class_=lambda x: x and "b-fight-details__table" in x)
             for table in tables:
                 rows = table.find_all("tr")
                 if len(rows) >= 2:
@@ -154,7 +165,8 @@ async def _get_fights_old(session: aiohttp.ClientSession, event_url: str) -> Lis
             soup = BeautifulSoup(html, 'html.parser')
             
             fights = []
-            fights_table = soup.find("table", {"class": "b-fight-details__table"})
+            # Исправленный поиск таблицы
+            fights_table = soup.find("table", class_=lambda x: x and "b-fight-details__table" in x)
             
             if fights_table:
                 fight_rows = fights_table.find_all("tr")[1:]
